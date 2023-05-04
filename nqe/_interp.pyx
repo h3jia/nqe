@@ -137,7 +137,7 @@ cdef double _int_p_dx_args(double a, void *args):
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef double _get_dydx_1(double h0, double h1, double m0, double m1) nogil:
-    cdef d = ((2 * h0 + h1) * m0 - h0 * m1) / (h0 + h1)
+    cdef double d = ((2 * h0 + h1) * m0 - h0 * m1) / (h0 + h1)
     if d * m0 <= 0.:
         return 0.
     elif m0 * m1 <= 0. and fabs(d) > 3. * fabs(m0):
