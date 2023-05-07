@@ -264,15 +264,15 @@ cdef double _int_p_dx(double a, double h, double p0, double dpdx0, double mass) 
         else:
             return nan
     else:
-        if a > 0:
+        if absa < fabs(dpdx0 * dpdx0 / 4. / p0 / p0) / 600.: # avoid computing exp(>600)
+            return p0 * p0 / dpdx0 * (exp(dpdx0 / p0 * h) - 1) - mass
+        elif a > 0:
             return (
                 sqrt(pi) * p0 / 2. / sqrt(absa) * exp(-dpdx0 * dpdx0 / 4. / absa / p0 / p0) * (
                     erfi((2 * absa * p0 * h + dpdx0) / 2. / sqrt(absa) / p0) -
                     erfi(dpdx0 / 2. / sqrt(absa) / p0)
                 ) - mass
             )
-        elif a == 0:
-            return p0 * p0 / dpdx0 * (exp(dpdx0 / p0 * h) - 1) - mass
         elif a < 0:
             return (
                 sqrt(pi) * p0 / 2. / sqrt(absa) * exp(dpdx0 * dpdx0 / 4. / absa / p0 / p0) * (
@@ -469,11 +469,11 @@ def get_pdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
                     h[i] = knots[j[i] + 1] - knots[j[i]]
                     t[i] = (xs[i] - knots[j[i]]) / h[i]
                     ys[i] = (
-                        (6. * t[i] * t[i] - 6. * t[i]) * quantiles[j[i]] +
-                        (3. * t[i] * t[i] - 4. * t[i] + 1.) * h[i] * dydxs[j[i]] +
-                        (-6. * t[i] * t[i] + 6. * t[i]) * quantiles[j[i] + 1] +
-                        (3. * t[i] * t[i] - 2. * t[i]) * h[i] * dydxs[j[i] + 1]
-                    ) / h[i]
+                        (6. * t[i] * t[i] - 6. * t[i]) / h[i] * quantiles[j[i]] +
+                        (3. * t[i] * t[i] - 4. * t[i] + 1.) * dydxs[j[i]] +
+                        (-6. * t[i] * t[i] + 6. * t[i]) / h[i] * quantiles[j[i] + 1] +
+                        (3. * t[i] * t[i] - 2. * t[i]) * dydxs[j[i] + 1]
+                    )
                 elif types[j[i]] == DOUBLE_EXP:
                     t[i] = xs[i] - knots[j[i]]
                     ys[i] = dydxs[j[i]] * exp(expas[j[i], 0] * t[i] * t[i] +
@@ -491,8 +491,10 @@ def get_pdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
                                               dpdxs[j[i]] / dydxs[j[i]] * t[i])
                 else:
                     ys[i] = nan
-            else:
+            elif j[i] == -1 or j[i] == n_interval:
                 ys[i] = 0.
+            else:
+                ys[i] = nan
     finally:
         free(j)
         free(h)
@@ -502,7 +504,66 @@ def get_pdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-def get_cdf(double[::1] out, const double[::1] knots, const double[::1] quantiles,
-            const double[::1] dydxs, const double[::1] dpdxs, const double[::1] expas,
-            const double[::1] types, int n_point, int n_interval):
+def get_cdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
+            const double[::1] quantiles, const double[::1] dydxs, const double[::1] dpdxs,
+            const double[:, ::1] expas, const int[::1] types, int n_point, int n_interval):
+    cdef size_t i
+    cdef int *j = <int *> malloc(n_point * sizeof(int))
+    cdef double *h = <double *> malloc(n_point * sizeof(double))
+    cdef double *t = <double *> malloc(n_point * sizeof(double))
+    if not j or not h or not t:
+        raise MemoryError('cannot malloc required array in get_pdf.')
+    try:
+        for i in range(n_point): # prange(n_point, nogil=True, schedule='static'):
+            j[i] = find_interval(&knots[0], n_interval + 1, xs[i]) - 1
+            if j[i] >= 0 and j[i] <= n_interval - 1:
+                if (types[j[i]] == NORMAL_CUBIC or types[j[i]] == LEFT_END_CUBIC or
+                    types[j[i]] == RIGHT_END_CUBIC or types[j[i]] == LINEAR):
+                    h[i] = knots[j[i] + 1] - knots[j[i]]
+                    t[i] = (xs[i] - knots[j[i]]) / h[i]
+                    ys[i] = (
+                        (2. * t[i] * t[i] * t[i] - 3. * t[i] * t[i] + 1.) * quantiles[j[i]] +
+                        (t[i] * t[i] * t[i] - 2. * t[i] * t[i] + t[i]) * h[i] * dydxs[j[i]] +
+                        (-2. * t[i] * t[i] * t[i] + 3. * t[i] * t[i]) * quantiles[j[i] + 1] +
+                        (t[i] * t[i] * t[i] - t[i] * t[i]) * h[i] * dydxs[j[i] + 1]
+                    )
+                elif types[j[i]] == DOUBLE_EXP:
+                    ys[i] = 0.5 * (quantiles[j[i]] + quantiles[j[i] + 1])
+                    ys[i] += _int_p_dx(expas[j[i], 0], xs[i] - knots[j[i]], dydxs[j[i]],
+                                       dpdxs[j[i]], 0.)
+                    ys[i] -= _int_p_dx(expas[j[i], 1], knots[j[i] + 1] - xs[i], dydxs[j[i] + 1],
+                                       -dpdxs[j[i] + 1], 0.)
+                elif types[j[i]] == LEFT_END_EXP:
+                    ys[i] = quantiles[j[i] + 1]
+                    ys[i] -= _int_p_dx(0., knots[j[i] + 1] - xs[i], dydxs[j[i] + 1],
+                                       -dpdxs[j[i] + 1], 0.) # expas[j[i], 1]
+                elif types[j[i]] == RIGHT_END_EXP:
+                    ys[i] = quantiles[j[i]]
+                    ys[i] += _int_p_dx(expas[j[i], 0], xs[i] - knots[j[i]], dydxs[j[i]],
+                                       dpdxs[j[i]], 0.)
+                else:
+                    ys[i] = nan
+                if ys[i] < 0.:
+                    ys[i] = 0.
+                elif ys[i] > 1.:
+                    ys[i] = 1.
+            elif j[i] == -1:
+                ys[i] = 0.
+            elif j[i] == n_interval:
+                ys[i] = 1.
+            else:
+                ys[i] = nan
+
+    finally:
+        free(j)
+        free(h)
+        free(t)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+def get_ppf(double[::1] xs, const double[::1] ys, const double[::1] knots,
+            const double[::1] quantiles, const double[::1] dydxs, const double[::1] dpdxs,
+            const double[:, ::1] expas, const int[::1] types, int n_point, int n_interval):
     pass

@@ -66,19 +66,34 @@ class Interp1D:
     def set_all(self):
         self.set_interval(0, self.n_interval)
 
+    def check(self, x):
+        xmin = np.min(x)
+        xmax = np.max(x)
+        # assert xmin >= self.knots[0] and xmax <= self.knots[-1]
+        imin = np.searchsorted(self.knots, xmin)
+        imax = np.searchsorted(self.knots, xmax)
+        if not np.all(self.types[imin:(imax + 1)]):
+            self.set_interval(imin, imax + 1)
+
     def pdf(self, x, check=True):
         x = np.asarray(x, dtype=float)
         if x.ndim <= 1 and x.size > 0:
             if check:
-                xmin = np.min(x)
-                xmax = np.max(x)
-                assert xmin >= self.knots[0] and xmax <= self.knots[-1]
-                imin = np.searchsorted(self.knots, xmin)
-                imax = np.searchsorted(self.knots, xmax)
-                if not np.all(self.types[imin:(imax + 1)]):
-                    self.set_interval(imin, imax + 1)
+                self.check(x)
             out = np.empty_like(np.atleast_1d(x))
             get_pdf(np.atleast_1d(x), out, self.knots, self.quantiles, self.dydxs, self.dpdxs,
+                    self.expas, self.types, out.size, self.n_interval)
+            return out if x.ndim == 1 else float(out)
+        else:
+            raise NotImplementedError
+
+    def cdf(self, x, check=True):
+        x = np.asarray(x, dtype=float)
+        if x.ndim <= 1 and x.size > 0:
+            if check:
+                self.check(x)
+            out = np.empty_like(np.atleast_1d(x))
+            get_cdf(np.atleast_1d(x), out, self.knots, self.quantiles, self.dydxs, self.dpdxs,
                     self.expas, self.types, out.size, self.n_interval)
             return out if x.ndim == 1 else float(out)
         else:
