@@ -249,7 +249,7 @@ cdef double _solve_single_dpdx(double h, double p0, double dpdx0, double mass) n
                   MITR, NULL)
 
 
-"""@cython.wraparound(False)
+@cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef double _int_p_dx(double a, double h, double p0, double dpdx0, double mass) nogil:
@@ -275,18 +275,28 @@ cdef double _int_p_dx(double a, double h, double p0, double dpdx0, double mass) 
                 ) - mass
             )
         elif a < 0:
-            return (
-                sqrt(pi) * p0 / 2. / sqrt(absa) * (
-                    exp(-absa * h * h + dpdx0 * h / p0) *
-                    erfcx((-2 * absa * p0 * h + dpdx0) / 2. / sqrt(absa) / p0) -
-                    erfcx(dpdx0 / 2. / sqrt(absa) / p0)
-                ) - mass
-            )
+            # erfcx likes positive inputs
+            if dpdx0 > 0.:
+                return (
+                    sqrt(pi) * p0 / 2. / sqrt(absa) * (
+                        exp(-absa * h * h + dpdx0 * h / p0) *
+                        erfcx((-2 * absa * p0 * h + dpdx0) / 2. / sqrt(absa) / p0) -
+                        erfcx(dpdx0 / 2. / sqrt(absa) / p0)
+                    ) - mass
+                )
+            else:
+                return (
+                    sqrt(pi) * p0 / 2. / sqrt(absa) * (
+                        -exp(-absa * h * h + dpdx0 * h / p0) *
+                        erfcx((2 * absa * p0 * h - dpdx0) / 2. / sqrt(absa) / p0) +
+                        erfcx(-dpdx0 / 2. / sqrt(absa) / p0)
+                    ) - mass
+                )
         else:
-            return nan"""
+            return nan
 
 
-@cython.wraparound(False)
+"""@cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef double _int_p_dx(double a, double h, double p0, double dpdx0, double mass) nogil:
@@ -318,7 +328,7 @@ cdef double _int_p_dx(double a, double h, double p0, double dpdx0, double mass) 
                 ) - mass
             )
         else:
-            return nan
+            return nan"""
 
 
 @cython.wraparound(False)
@@ -597,10 +607,57 @@ def get_cdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
         free(t)
 
 
-@cython.wraparound(False)
+"""@cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
 def get_ppf(double[::1] xs, const double[::1] ys, const double[::1] knots,
             const double[::1] quantiles, const double[::1] dydxs, const double[::1] dpdxs,
             const double[:, ::1] expas, const int[::1] types, int n_point, int n_interval):
-    pass
+    cdef size_t i
+    cdef int *j = <int *> malloc(n_point * sizeof(int))
+    cdef double *h = <double *> malloc(n_point * sizeof(double))
+    cdef double *t = <double *> malloc(n_point * sizeof(double))
+    if not j or not h or not t:
+        raise MemoryError('cannot malloc required array in get_pdf.')
+    try:
+        for i in range(n_point): # prange(n_point, nogil=True, schedule='static'):
+            if ys[i] == 0.:
+                xs[i] = knots[0]
+            elif ys[i] == 1:
+                xs[i] = knots[n_interval]
+            else:
+                j[i] = find_interval(&knots[0], n_interval + 1, xs[i]) - 1
+                if j[i] >= 0 and j[i] <= n_interval - 1:
+                    if (types[j[i]] == NORMAL_CUBIC or types[j[i]] == LEFT_END_CUBIC or
+                        types[j[i]] == RIGHT_END_CUBIC or types[j[i]] == LINEAR):
+                        h[i] = knots[j[i] + 1] - knots[j[i]]
+                        t[i] = (xs[i] - knots[j[i]]) / h[i]
+                        ys[i] = (
+                            (2. * t[i] * t[i] * t[i] - 3. * t[i] * t[i] + 1.) * quantiles[j[i]] +
+                            (t[i] * t[i] * t[i] - 2. * t[i] * t[i] + t[i]) * h[i] * dydxs[j[i]] +
+                            (-2. * t[i] * t[i] * t[i] + 3. * t[i] * t[i]) * quantiles[j[i] + 1] +
+                            (t[i] * t[i] * t[i] - t[i] * t[i]) * h[i] * dydxs[j[i] + 1]
+                        )
+                    elif types[j[i]] == DOUBLE_EXP:
+                        ys[i] = 0.5 * (quantiles[j[i]] + quantiles[j[i] + 1])
+                        ys[i] += _int_p_dx(expas[j[i], 0], xs[i] - knots[j[i]], dydxs[j[i]],
+                                           dpdxs[j[i]], 0.)
+                        ys[i] -= _int_p_dx(expas[j[i], 1], knots[j[i] + 1] - xs[i], dydxs[j[i] + 1],
+                                           -dpdxs[j[i] + 1], 0.)
+                    elif types[j[i]] == LEFT_END_EXP:
+                        ys[i] = quantiles[j[i] + 1]
+                        ys[i] -= _int_p_dx(expas[j[i], 1], knots[j[i] + 1] - xs[i], dydxs[j[i] + 1],
+                                           -dpdxs[j[i] + 1], 0.)
+                    elif types[j[i]] == RIGHT_END_EXP:
+                        ys[i] = quantiles[j[i]]
+                        ys[i] += _int_p_dx(expas[j[i], 0], xs[i] - knots[j[i]], dydxs[j[i]],
+                                           dpdxs[j[i]], 0.)
+                    else:
+                        ys[i] = nan
+                else:
+                    xs[i] = nan
+
+    finally:
+        free(j)
+        free(h)
+        free(t)"""
