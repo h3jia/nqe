@@ -1,15 +1,18 @@
 import numpy as np
 cimport numpy as np
 cimport cython
+from cython.parallel import prange
 from cython.parallel cimport prange
 from scipy.special.cython_special cimport erf, erfi
-from libc.math cimport exp, sqrt, pi, fabs, fmax
+from libc.stdlib cimport malloc, free
+from libc.math cimport exp, sqrt, pi, fabs, fmax, fmin
 from scipy.optimize.cython_optimize cimport brentq
 cdef extern from "numpy/npy_math.h":
     double nan "NPY_NAN"
+    double inf "NPY_INFINITY"
 
 
-__all__ = ['find_interval', 'get_split_factors']
+__all__ = ['get_split_factors', 'get_types', 'get_dydxs', 'get_exps', 'get_pdf', 'get_cdf']
 
 
 ctypedef struct int_p_dx_params:
@@ -20,6 +23,97 @@ ctypedef struct int_p_dx_params:
 
 cdef double XTOL = 1e-8, RTOL = 1e-8
 cdef int MITR = 200
+cdef int UNDEFINED = 0, NORMAL_CUBIC = 1, LEFT_END_CUBIC = 2, RIGHT_END_CUBIC = 3, LINEAR = 4
+cdef int DOUBLE_EXP = 5, LEFT_END_EXP = 6, RIGHT_END_EXP = 7
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef inline int _max(int a, int b) nogil:
+    return a if a > b else b
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef inline int _min(int a, int b) nogil:
+    return a if a < b else b
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef int find_interval(const double* x, int m, double xval, int prev_interval=-1) nogil:
+    """
+    Find an interval such that x[interval - 1] <= xval < x[interval].
+
+    Assumeing that x is sorted in the ascending order. If xval < x[0], then interval = 0, if xval >
+    x[-1] then interval = m.
+
+    Parameters
+    ----------
+    x : ndarray of double, shape (m,)
+        Piecewise polynomial breakpoints sorted in ascending order.
+    m : int
+        Shape of x.
+    xval : double
+        Point to find.
+    prev_interval : int, optional
+        Interval where a previous point was found.
+
+    Returns
+    -------
+    interval : int
+        Suitable interval or -1 if nan.
+    """
+    cdef int high, low, mid, interval
+    cdef double a, b
+
+    a = x[0]
+    b = x[m - 1]
+
+    interval = prev_interval
+    if interval < 0 or interval > m:
+        interval = m // 2
+
+    if not (a <= xval < b):
+        if xval < a:
+            # below
+            interval = 0
+        elif xval >= b:
+            # above
+            interval = m
+        else:
+            # nan
+            interval = -1
+    else:
+        # Find the interval the coordinate is in (binary search with locality)
+        if xval >= x[interval - 1]:
+            low = interval
+            high = m - 1
+        else:
+            low = 1
+            high = interval - 1
+
+        if xval < x[low]:
+            high = low
+
+        while low < high:
+            mid = (high + low) // 2
+            if xval < x[mid]:
+                # mid < high
+                high = mid
+            elif xval >= x[mid + 1]:
+                low = mid + 2
+            else:
+                # x[mid] <= xval < x[mid+1]
+                low = mid + 1
+                break
+
+        interval = low
+
+    return interval
 
 
 @cython.wraparound(False)
@@ -46,19 +140,39 @@ cdef double _get_split_factor(const double* knots, const double* quantiles) nogi
     cdef double dydx1 = _get_dydx_1(h1, h0, m1, m0)
     cdef double dydx2 = _get_dydx_1(h3, h4, m3, m4)
     cdef double dydx3 = _get_dydx_2(h3, h4, m3, m4)
-    cdef double dpdx1 = 6. * y0 + 2. * dydx0 - 6. * y1 + 4. * dydx1
-    cdef double dpdx2 = -1. * (-6. * y2 - 4. * dydx2 + 6. * y3 - 2. * dydx3)
-    cdef double a1 = _solve_single_exp(h2, dydx1, dpdx1, 0.5 * (y2 - y1))
-    cdef double a2 = _solve_single_exp(h2, dydx2, dpdx2, 0.5 * (y2 - y1))
-    cdef double p1a = dydx2 * exp(a2 * h2 * h2 + dpdx2 / dydx2 * h2)
-    cdef double p2a = dydx1 * exp(a1 * h2 * h2 + dpdx1 / dydx1 * h2)
-    return fmax(p1a / dydx1, p2a / dydx2)
+    cdef double dpdx1, dpdx2, a1, a2, p1a, p2a
+    if dydx1 > 0. and dydx2 > 0.:
+        dpdx1 = _get_right_end_dpdx(h1, y0, y1, dydx0, dydx1)
+        dpdx2 = _get_left_end_dpdx(h3, y2, y3, dydx2, dydx3)
+        a1 = _solve_single_expa(h2, dydx1, dpdx1, 0.5 * (y2 - y1))
+        a2 = _solve_single_expa(h2, dydx2, -dpdx2, 0.5 * (y2 - y1))
+        p1a = dydx2 * exp(a2 * h2 * h2 - dpdx2 / dydx2 * h2)
+        p2a = dydx1 * exp(a1 * h2 * h2 + dpdx1 / dydx1 * h2)
+        return fmax(p1a / dydx1, p2a / dydx2)
+    else:
+        return inf
 
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _solve_single_exp(double h, double p0, double dpdx0, double mass) nogil:
+cdef inline double _get_left_end_dpdx(double h, double y0, double y1, double dydx0,
+                                      double dydx1) nogil:
+    return -6. * y0 - 4. * dydx0 * h + 6. * y1 - 2. * dydx1 * h
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef inline double _get_right_end_dpdx(double h, double y0, double y1, double dydx0,
+                                       double dydx1) nogil:
+    return 6. * y0 + 2. * dydx0 * h - 6. * y1 + 4. * dydx1 * h
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef double _solve_single_expa(double h, double p0, double dpdx0, double mass) nogil:
     cdef int_p_dx_params myargs = {'h': h, 'p0': p0, 'dpdx0': dpdx0, 'mass': mass}
     cdef double a0, a1, tmp
     cdef int i = 0
@@ -95,7 +209,7 @@ cdef double _solve_single_exp(double h, double p0, double dpdx0, double mass) no
 @cython.cdivision(True)
 cdef double _int_p_dx(double a, double h, double p0, double dpdx0, double mass) nogil:
     cdef double absa = fabs(a)
-    if dpdx0 == 0:
+    if fabs(dpdx0 / p0 * h) < 1e-8:
         if a > 0:
             return sqrt(pi) * p0 / 2. / sqrt(absa) * erfi(sqrt(absa) * h) - mass
         elif a == 0:
@@ -160,6 +274,21 @@ cdef double _get_dydx_2(double h0, double h1, double m0, double m1) nogil:
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
+cdef void _get_types(int* types):
+    if types[1] == UNDEFINED:
+        if types[0] != DOUBLE_EXP and types[2] != DOUBLE_EXP:
+            types[1] = NORMAL_CUBIC
+        elif types[0] == DOUBLE_EXP and types[2] != DOUBLE_EXP:
+            types[1] = LEFT_END_CUBIC
+        elif types[0] != DOUBLE_EXP and types[2] == DOUBLE_EXP:
+            types[1] = RIGHT_END_CUBIC
+        else:
+            types[1] = LINEAR
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
 def get_split_factors(double[::1] split_factors, const double[::1] knots,
                       const double[::1] quantiles, int n_interval, int i_start, int i_end):
     if i_start < 2:
@@ -168,3 +297,142 @@ def get_split_factors(double[::1] split_factors, const double[::1] knots,
         i_end = n_interval - 2
     _get_split_factors(&split_factors[i_start], &knots[i_start - 2], &quantiles[i_start - 2],
                        i_end - i_start)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+def get_types(int[::1] types, const double[::1] split_factors, int n_interval, int i_start,
+              int i_end, double split_threshold):
+    cdef size_t i
+    for i in range(_max(i_start, 2), _min(i_end, n_interval - 2)):
+        if split_factors[i] < fmin(split_threshold, fmin(split_factors[i - 1],
+                                                         split_factors[i + 1])):
+            types[i] = DOUBLE_EXP
+    for i in range(_max(i_start, 2), _min(i_end, n_interval - 2)):
+        _get_types(&types[i - 1])
+    if i_start < 2:
+        types[0] = LEFT_END_EXP
+        types[1] = LEFT_END_CUBIC if types[2] != DOUBLE_EXP else LINEAR
+    if i_end > n_interval - 2:
+        types[n_interval - 1] = RIGHT_END_EXP
+        types[n_interval - 2] = RIGHT_END_CUBIC if types[n_interval - 3] != DOUBLE_EXP else LINEAR
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+def get_dydxs(double[::1] dydxs, const double[::1] knots, const double[::1] quantiles,
+              const int[::1] types, int n_interval, int i_start, int i_end):
+    cdef size_t i
+    cdef double h0, h1
+    for i in prange(_max(i_start, 1), _min(i_end + 1, n_interval), nogil=True,
+                    schedule='static'):
+        if types[i] == LINEAR:
+            dydxs[i] = (quantiles[i + 1] - quantiles[i]) / (knots[i + 1] - knots[i])
+        elif types[i - 1] == LINEAR:
+            dydxs[i] = (quantiles[i] - quantiles[i - 1]) / (knots[i] - knots[i - 1])
+        elif types[i] == NORMAL_CUBIC or types[i] == RIGHT_END_CUBIC:
+            h0 = knots[i] - knots[i - 1]
+            h1 = knots[i + 1] - knots[i]
+            dydxs[i] = _get_dydx_2(h0, h1, (quantiles[i] - quantiles[i - 1]) / h0,
+                                   (quantiles[i + 1] - quantiles[i]) / h1)
+        elif types[i] == LEFT_END_CUBIC:
+            h0 = knots[i + 1] - knots[i]
+            h1 = knots[i + 2] - knots[i + 1]
+            dydxs[i] = _get_dydx_1(h0, h1, (quantiles[i + 1] - quantiles[i]) / h0,
+                                   (quantiles[i + 2] - quantiles[i + 1]) / h1)
+        elif types[i] == DOUBLE_EXP or types[i] == RIGHT_END_EXP:
+            h0 = knots[i] - knots[i - 1]
+            h1 = knots[i - 1] - knots[i - 2]
+            dydxs[i] = _get_dydx_1(h0, h1, (quantiles[i] - quantiles[i - 1]) / h0,
+                                   (quantiles[i - 1] - quantiles[i - 2]) / h1)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+def get_exps(double[:, ::1] expas, double[::1] dpdxs, const double[::1] knots,
+             const double[::1] quantiles, const double[::1] dydxs, const int[::1] types,
+             int n_interval, int i_start, int i_end):
+    cdef size_t i
+    for i in prange(i_start, i_end, nogil=True, schedule='static'):
+        if types[i] == DOUBLE_EXP:
+            dpdxs[i] = _get_right_end_dpdx(knots[i] - knots[i - 1], quantiles[i - 1], quantiles[i],
+                                           dydxs[i - 1], dydxs[i])
+            dpdxs[i + 1] = _get_left_end_dpdx(knots[i + 2] - knots[i + 1], quantiles[i + 1],
+                                              quantiles[i + 2], dydxs[i + 1], dydxs[i + 2])
+            expas[i, 0] = _solve_single_expa(knots[i + 1] - knots[i], dydxs[i], dpdxs[i],
+                                             0.5 * (quantiles[i + 1] - quantiles[i]))
+            expas[i, 1] = _solve_single_expa(knots[i + 1] - knots[i], dydxs[i + 1], -dpdxs[i + 1],
+                                             0.5 * (quantiles[i + 1] - quantiles[i]))
+        elif types[i] == LEFT_END_EXP:
+            dpdxs[i + 1] = _get_left_end_dpdx(knots[i + 2] - knots[i + 1], quantiles[i + 1],
+                                              quantiles[i + 2], dydxs[i + 1], dydxs[i + 2])
+            expas[i, 1] = _solve_single_expa(knots[i + 1] - knots[i], dydxs[i + 1], -dpdxs[i + 1],
+                                             quantiles[i + 1] - quantiles[i])
+        elif types[i] == RIGHT_END_EXP:
+            dpdxs[i] = _get_right_end_dpdx(knots[i] - knots[i - 1], quantiles[i - 1], quantiles[i],
+                                           dydxs[i - 1], dydxs[i])
+            expas[i, 0] = _solve_single_expa(knots[i + 1] - knots[i], dydxs[i], dpdxs[i],
+                                             quantiles[i + 1] - quantiles[i])
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+def get_pdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
+            const double[::1] quantiles, const double[::1] dydxs, const double[::1] dpdxs,
+            const double[:, ::1] expas, const int[::1] types, int n_point, int n_interval):
+    cdef size_t i
+    cdef int *j = <int *> malloc(n_point * sizeof(int))
+    cdef double *h = <double *> malloc(n_point * sizeof(double))
+    cdef double *t = <double *> malloc(n_point * sizeof(double))
+    if not j or not h or not t:
+        raise MemoryError('cannot malloc required array in get_pdf.')
+    try:
+        for i in range(n_point): # prange(n_point, nogil=True, schedule='static'):
+            j[i] = find_interval(&knots[0], n_interval + 1, xs[i]) - 1
+            if j[i] >= 0 and j[i] <= n_interval - 1:
+                if (types[j[i]] == NORMAL_CUBIC or types[j[i]] == LEFT_END_CUBIC or
+                    types[j[i]] == RIGHT_END_CUBIC or types[j[i]] == LINEAR):
+                    h[i] = knots[j[i] + 1] - knots[j[i]]
+                    t[i] = (xs[i] - knots[j[i]]) / h[i]
+                    ys[i] = (
+                        (6. * t[i] * t[i] - 6. * t[i]) * quantiles[j[i]] +
+                        (3. * t[i] * t[i] - 4. * t[i] + 1.) * h[i] * dydxs[j[i]] +
+                        (-6. * t[i] * t[i] + 6. * t[i]) * quantiles[j[i] + 1] +
+                        (3. * t[i] * t[i] - 2. * t[i]) * h[i] * dydxs[j[i] + 1]
+                    ) / h[i]
+                elif types[j[i]] == DOUBLE_EXP:
+                    t[i] = xs[i] - knots[j[i]]
+                    ys[i] = dydxs[j[i]] * exp(expas[j[i], 0] * t[i] * t[i] +
+                                              dpdxs[j[i]] / dydxs[j[i]] * t[i])
+                    t[i] = knots[j[i] + 1] - xs[i]
+                    ys[i] += dydxs[j[i] + 1] * exp(expas[j[i] + 1, 1] * t[i] * t[i] +
+                                                   -dpdxs[j[i] + 1] / dydxs[j[i] + 1] * t[i])
+                elif types[j[i]] == LEFT_END_EXP:
+                    t[i] = knots[j[i] + 1] - xs[i]
+                    ys[i] = dydxs[j[i] + 1] * exp(expas[j[i], 1] * t[i] * t[i] +
+                                                  -dpdxs[j[i] + 1] / dydxs[j[i] + 1] * t[i])
+                elif types[j[i]] == RIGHT_END_EXP:
+                    t[i] = xs[i] - knots[j[i]]
+                    ys[i] = dydxs[j[i]] * exp(expas[j[i], 0] * t[i] * t[i] +
+                                              dpdxs[j[i]] / dydxs[j[i]] * t[i])
+                else:
+                    ys[i] = nan
+            else:
+                ys[i] = 0.
+    finally:
+        free(j)
+        free(h)
+        free(t)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+def get_cdf(double[::1] out, const double[::1] knots, const double[::1] quantiles,
+            const double[::1] dydxs, const double[::1] dpdxs, const double[::1] expas,
+            const double[::1] types, int n_point, int n_interval):
+    pass
