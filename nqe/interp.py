@@ -18,7 +18,7 @@ MERGE_EXP = 8
 
 
 class Interp1D:
-    def __init__(self, knots, quantiles, split_threshold=1e-4):
+    def __init__(self, knots, quantiles, split_threshold=1e-2):
         self.knots = np.asarray(knots, dtype=float).reshape(-1)
         self.quantiles = np.asarray(quantiles, dtype=float).reshape(-1)
         assert self.knots.shape == self.quantiles.shape

@@ -3,7 +3,7 @@ cimport numpy as np
 cimport cython
 from cython.parallel import prange
 from cython.parallel cimport prange
-from scipy.special.cython_special cimport erf, erfi
+from scipy.special.cython_special cimport erf, erfi, erfcx, dawsn
 from libc.stdlib cimport malloc, free
 from libc.math cimport exp, sqrt, pi, fabs, fmax, fmin
 from scipy.optimize.cython_optimize cimport brentq
@@ -26,8 +26,8 @@ ctypedef struct int_p_dx_params_dpdx:
     double p0
     double mass
 
-cdef double XTOL = 1e-8, RTOL = 1e-8
-cdef int MITR = 200
+cdef double XTOL = 1e-10, RTOL = 1e-10
+cdef int MITR = 300
 cdef int UNDEFINED = 0, NORMAL_CUBIC = 1, LEFT_END_CUBIC = 2, RIGHT_END_CUBIC = 3, LINEAR = 4
 cdef int DOUBLE_EXP = 5, LEFT_END_EXP = 6, RIGHT_END_EXP = 7, MERGE_EXP = 8
 
@@ -200,7 +200,7 @@ cdef double _solve_single_expa(double h, double p0, double dpdx0, double mass) n
             a0 *= 3.
             i += 1
             tmp = _int_p_dx(a0, h, p0, dpdx0, mass)
-            if i > 200:
+            if i > MITR:
                 return nan
     elif tmp < 0.:
         a0 = 0.
@@ -210,7 +210,7 @@ cdef double _solve_single_expa(double h, double p0, double dpdx0, double mass) n
             a1 *= 3.
             i += 1
             tmp = _int_p_dx(a1, h, p0, dpdx0, mass)
-            if i > 200:
+            if i > MITR:
                 return nan
     elif tmp == 0.:
         return 0.
@@ -233,20 +233,57 @@ cdef double _solve_single_dpdx(double h, double p0, double dpdx0, double mass) n
     else:
         dpdx1 = -3. * fabs(dpdx0)
         dpdx2 = 3. * fabs(dpdx0)
-    for i in range(201):
+    for i in range(MITR + 1):
         if _int_p_dx(0., h, p0, dpdx1, mass) < 0.:
             break
         dpdx1 *= 3.
-        if i == 200:
+        if i == MITR:
             return nan
-    for i in range(201):
+    for i in range(MITR + 1):
         if _int_p_dx(0., h, p0, dpdx2, mass) > 0.:
             break
         dpdx2 *= 3.
-        if i == 200:
+        if i == MITR:
             return nan
     return brentq(_int_p_dx_args_dpdx, dpdx1, dpdx2, <int_p_dx_params_dpdx *> &myargs, XTOL, RTOL,
                   MITR, NULL)
+
+
+"""@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef double _int_p_dx(double a, double h, double p0, double dpdx0, double mass) nogil:
+    cdef double absa = fabs(a)
+    if fabs(dpdx0 / p0 * h) < 1e-8:
+        if a > 0:
+            return sqrt(pi) * p0 / 2. / sqrt(absa) * erfi(sqrt(absa) * h) - mass
+        elif a == 0:
+            return p0 * h - mass
+        elif a < 0:
+            return sqrt(pi) * p0 / 2. / sqrt(absa) * erf(sqrt(absa) * h) - mass
+        else:
+            return nan
+    else:
+        if sqrt(absa) < fabs(dpdx0 / 2. / p0) * 1e-10:
+            return p0 * p0 / dpdx0 * (exp(dpdx0 / p0 * h) - 1) - mass
+        elif a > 0:
+            return (
+                p0 / sqrt(absa) * (
+                    exp(absa * h * h + dpdx0 * h / p0) *
+                    dawsn((2. * absa * p0 * h + dpdx0) / 2. / sqrt(absa) / p0) -
+                    dawsn(dpdx0 / 2. / sqrt(absa) / p0)
+                ) - mass
+            )
+        elif a < 0:
+            return (
+                sqrt(pi) * p0 / 2. / sqrt(absa) * (
+                    exp(-absa * h * h + dpdx0 * h / p0) *
+                    erfcx((-2 * absa * p0 * h + dpdx0) / 2. / sqrt(absa) / p0) -
+                    erfcx(dpdx0 / 2. / sqrt(absa) / p0)
+                ) - mass
+            )
+        else:
+            return nan"""
 
 
 @cython.wraparound(False)
@@ -535,8 +572,8 @@ def get_cdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
                                        -dpdxs[j[i] + 1], 0.)
                 elif types[j[i]] == LEFT_END_EXP:
                     ys[i] = quantiles[j[i] + 1]
-                    ys[i] -= _int_p_dx(0., knots[j[i] + 1] - xs[i], dydxs[j[i] + 1],
-                                       -dpdxs[j[i] + 1], 0.) # expas[j[i], 1]
+                    ys[i] -= _int_p_dx(expas[j[i], 1], knots[j[i] + 1] - xs[i], dydxs[j[i] + 1],
+                                       -dpdxs[j[i] + 1], 0.)
                 elif types[j[i]] == RIGHT_END_EXP:
                     ys[i] = quantiles[j[i]]
                     ys[i] += _int_p_dx(expas[j[i], 0], xs[i] - knots[j[i]], dydxs[j[i]],
