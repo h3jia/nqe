@@ -15,10 +15,15 @@ cdef extern from "numpy/npy_math.h":
 __all__ = ['get_split_factors', 'get_types', 'get_dydxs', 'get_exps', 'get_pdf', 'get_cdf']
 
 
-ctypedef struct int_p_dx_params:
+ctypedef struct int_p_dx_params_expa:
     double h
     double p0
     double dpdx0
+    double mass
+
+ctypedef struct int_p_dx_params_dpdx:
+    double h
+    double p0
     double mass
 
 cdef double XTOL = 1e-8, RTOL = 1e-8
@@ -143,9 +148,15 @@ cdef double _get_split_factor(const double* knots, const double* quantiles) nogi
     cdef double dpdx1, dpdx2, a1, a2, p1a, p2a
     if dydx1 > 0. and dydx2 > 0.:
         dpdx1 = _get_right_end_dpdx(h1, y0, y1, dydx0, dydx1)
-        dpdx2 = _get_left_end_dpdx(h3, y2, y3, dydx2, dydx3)
         a1 = _solve_single_expa(h2, dydx1, dpdx1, 0.5 * (y2 - y1))
+        if dpdx1 * a1 < 0.:
+            a1 = 0.
+            dpdx1 = _solve_single_dpdx(h2, dydx1, dpdx1, 0.5 * (y2 - y1))
+        dpdx2 = _get_left_end_dpdx(h3, y2, y3, dydx2, dydx3)
         a2 = _solve_single_expa(h2, dydx2, -dpdx2, 0.5 * (y2 - y1))
+        if dpdx2 * a2 > 0.:
+            a2 = 0.
+            dpdx2 = -_solve_single_dpdx(h2, dydx2, -dpdx2, 0.5 * (y2 - y1))
         p1a = dydx2 * exp(a2 * h2 * h2 - dpdx2 / dydx2 * h2)
         p2a = dydx1 * exp(a1 * h2 * h2 + dpdx1 / dydx1 * h2)
         return fmax(p1a / dydx1, p2a / dydx2)
@@ -173,7 +184,7 @@ cdef inline double _get_right_end_dpdx(double h, double y0, double y1, double dy
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef double _solve_single_expa(double h, double p0, double dpdx0, double mass) nogil:
-    cdef int_p_dx_params myargs = {'h': h, 'p0': p0, 'dpdx0': dpdx0, 'mass': mass}
+    cdef int_p_dx_params_expa myargs = {'h': h, 'p0': p0, 'dpdx0': dpdx0, 'mass': mass}
     cdef double a0, a1, tmp
     cdef int i = 0
     tmp = _int_p_dx(0., h, p0, dpdx0, mass)
@@ -201,7 +212,37 @@ cdef double _solve_single_expa(double h, double p0, double dpdx0, double mass) n
         return 0.
     else:
         return nan
-    return brentq(_int_p_dx_args, a0, a1, <int_p_dx_params *> &myargs, XTOL, RTOL, MITR, NULL)
+    return brentq(_int_p_dx_args_expa, a0, a1, <int_p_dx_params_expa *> &myargs, XTOL, RTOL, MITR,
+                  NULL)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef double _solve_single_dpdx(double h, double p0, double dpdx0, double mass) nogil:
+    cdef int_p_dx_params_dpdx myargs = {'h': h, 'p0': p0, 'mass': mass}
+    cdef double dpdx1, dpdx2
+    cdef size_t i
+    if dpdx0 == 0.:
+        dpdx1 = -1.
+        dpdx2 = 1.
+    else:
+        dpdx1 = -3. * fabs(dpdx0)
+        dpdx2 = 3. * fabs(dpdx0)
+    for i in range(201):
+        if _int_p_dx(0., h, p0, dpdx1, mass) < 0.:
+            break
+        dpdx1 *= 3.
+        if i == 200:
+            return nan
+    for i in range(201):
+        if _int_p_dx(0., h, p0, dpdx2, mass) > 0.:
+            break
+        dpdx2 *= 3.
+        if i == 200:
+            return nan
+    return brentq(_int_p_dx_args_dpdx, dpdx1, dpdx2, <int_p_dx_params_dpdx *> &myargs, XTOL, RTOL,
+                  MITR, NULL)
 
 
 @cython.wraparound(False)
@@ -242,9 +283,17 @@ cdef double _int_p_dx(double a, double h, double p0, double dpdx0, double mass) 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _int_p_dx_args(double a, void *args):
-    cdef int_p_dx_params *myargs = <int_p_dx_params *> args
+cdef double _int_p_dx_args_expa(double a, void *args):
+    cdef int_p_dx_params_expa *myargs = <int_p_dx_params_expa *> args
     return _int_p_dx(a, myargs.h, myargs.p0, myargs.dpdx0, myargs.mass)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef double _int_p_dx_args_dpdx(double dpdx, void *args):
+    cdef int_p_dx_params_dpdx *myargs = <int_p_dx_params_dpdx *> args
+    return _int_p_dx(0., myargs.h, myargs.p0, dpdx, myargs.mass)
 
 
 @cython.wraparound(False)
@@ -357,25 +406,32 @@ def get_exps(double[:, ::1] expas, double[::1] dpdxs, const double[::1] knots,
              int n_interval, int i_start, int i_end):
     cdef size_t i
     for i in prange(i_start, i_end, nogil=True, schedule='static'):
-        if types[i] == DOUBLE_EXP:
+        if types[i] == DOUBLE_EXP or types[i] == RIGHT_END_EXP:
             dpdxs[i] = _get_right_end_dpdx(knots[i] - knots[i - 1], quantiles[i - 1], quantiles[i],
                                            dydxs[i - 1], dydxs[i])
+            expas[i, 0] = _solve_single_expa(
+                knots[i + 1] - knots[i], dydxs[i], dpdxs[i],
+                (0.5 if types[i] == DOUBLE_EXP else 1.) * (quantiles[i + 1] - quantiles[i])
+            )
+            if dpdxs[i] * expas[i, 0] < 0.:
+                expas[i, 0] = 0.
+                dpdxs[i] = _solve_single_dpdx(
+                    knots[i + 1] - knots[i], dydxs[i], dpdxs[i],
+                    (0.5 if types[i] == DOUBLE_EXP else 1.) * (quantiles[i + 1] - quantiles[i])
+                )
+        if types[i] == DOUBLE_EXP or types[i] == LEFT_END_EXP:
             dpdxs[i + 1] = _get_left_end_dpdx(knots[i + 2] - knots[i + 1], quantiles[i + 1],
                                               quantiles[i + 2], dydxs[i + 1], dydxs[i + 2])
-            expas[i, 0] = _solve_single_expa(knots[i + 1] - knots[i], dydxs[i], dpdxs[i],
-                                             0.5 * (quantiles[i + 1] - quantiles[i]))
-            expas[i, 1] = _solve_single_expa(knots[i + 1] - knots[i], dydxs[i + 1], -dpdxs[i + 1],
-                                             0.5 * (quantiles[i + 1] - quantiles[i]))
-        elif types[i] == LEFT_END_EXP:
-            dpdxs[i + 1] = _get_left_end_dpdx(knots[i + 2] - knots[i + 1], quantiles[i + 1],
-                                              quantiles[i + 2], dydxs[i + 1], dydxs[i + 2])
-            expas[i, 1] = _solve_single_expa(knots[i + 1] - knots[i], dydxs[i + 1], -dpdxs[i + 1],
-                                             quantiles[i + 1] - quantiles[i])
-        elif types[i] == RIGHT_END_EXP:
-            dpdxs[i] = _get_right_end_dpdx(knots[i] - knots[i - 1], quantiles[i - 1], quantiles[i],
-                                           dydxs[i - 1], dydxs[i])
-            expas[i, 0] = _solve_single_expa(knots[i + 1] - knots[i], dydxs[i], dpdxs[i],
-                                             quantiles[i + 1] - quantiles[i])
+            expas[i, 1] = _solve_single_expa(
+                knots[i + 1] - knots[i], dydxs[i + 1], -dpdxs[i + 1],
+                (0.5 if types[i] == DOUBLE_EXP else 1.) * (quantiles[i + 1] - quantiles[i])
+            )
+            if dpdxs[i + 1] * expas[i, 1] > 0.:
+                expas[i, 1] = 0.
+                dpdxs[i + 1] = -_solve_single_dpdx(
+                    knots[i + 1] - knots[i], dydxs[i + 1], -dpdxs[i + 1],
+                    (0.5 if types[i] == DOUBLE_EXP else 1.) * (quantiles[i + 1] - quantiles[i])
+                )
 
 
 @cython.wraparound(False)
@@ -409,7 +465,7 @@ def get_pdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
                     ys[i] = dydxs[j[i]] * exp(expas[j[i], 0] * t[i] * t[i] +
                                               dpdxs[j[i]] / dydxs[j[i]] * t[i])
                     t[i] = knots[j[i] + 1] - xs[i]
-                    ys[i] += dydxs[j[i] + 1] * exp(expas[j[i] + 1, 1] * t[i] * t[i] +
+                    ys[i] += dydxs[j[i] + 1] * exp(expas[j[i], 1] * t[i] * t[i] +
                                                    -dpdxs[j[i] + 1] / dydxs[j[i] + 1] * t[i])
                 elif types[j[i]] == LEFT_END_EXP:
                     t[i] = knots[j[i] + 1] - xs[i]
