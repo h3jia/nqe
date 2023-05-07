@@ -158,7 +158,7 @@ cdef double _get_split_factor(const double* knots, const double* quantiles) nogi
 @cython.cdivision(True)
 cdef inline double _get_left_end_dpdx(double h, double y0, double y1, double dydx0,
                                       double dydx1) nogil:
-    return -6. * y0 - 4. * dydx0 * h + 6. * y1 - 2. * dydx1 * h
+    return (-6. * y0 / h - 4. * dydx0 + 6. * y1 / h - 2. * dydx1) / h
 
 
 @cython.wraparound(False)
@@ -166,7 +166,7 @@ cdef inline double _get_left_end_dpdx(double h, double y0, double y1, double dyd
 @cython.cdivision(True)
 cdef inline double _get_right_end_dpdx(double h, double y0, double y1, double dydx0,
                                        double dydx1) nogil:
-    return 6. * y0 + 2. * dydx0 * h - 6. * y1 + 4. * dydx1 * h
+    return (6. * y0 / h + 2. * dydx0 - 6. * y1 / h + 4. * dydx1) / h
 
 
 @cython.wraparound(False)
