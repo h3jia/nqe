@@ -29,7 +29,7 @@ ctypedef struct int_p_dx_params_dpdx:
 cdef double XTOL = 1e-8, RTOL = 1e-8
 cdef int MITR = 200
 cdef int UNDEFINED = 0, NORMAL_CUBIC = 1, LEFT_END_CUBIC = 2, RIGHT_END_CUBIC = 3, LINEAR = 4
-cdef int DOUBLE_EXP = 5, LEFT_END_EXP = 6, RIGHT_END_EXP = 7
+cdef int DOUBLE_EXP = 5, LEFT_END_EXP = 6, RIGHT_END_EXP = 7, MERGE_EXP = 8
 
 
 @cython.wraparound(False)
@@ -125,22 +125,26 @@ cdef int find_interval(const double* x, int m, double xval, int prev_interval=-1
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef double _get_split_factors(double* split_factors, const double* knots, const double* quantiles,
-                               int n_interval):
+                               int n_interval, int central_width=1):
     cdef size_t i
     for i in prange(n_interval, nogil=True, schedule='static'):
-        split_factors[i] = _get_split_factor(&knots[i], &quantiles[i])
+        split_factors[i] = _get_split_factor(&knots[i], &quantiles[i], central_width)
 
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _get_split_factor(const double* knots, const double* quantiles) nogil:
-    cdef double y0 = quantiles[1], y1 = quantiles[2], y2 = quantiles[3], y3 = quantiles[4]
-    cdef double h0 = knots[1] - knots[0], h1 = knots[2] - knots[1], h2 = knots[3] - knots[2]
-    cdef double h3 = knots[4] - knots[3], h4 = knots[5] - knots[4]
+cdef double _get_split_factor(const double* knots, const double* quantiles, int central_width=1) nogil:
+    cdef int offset = central_width - 1
+    cdef double y0 = quantiles[1], y1 = quantiles[2]
+    cdef double y2 = quantiles[3 + offset], y3 = quantiles[4 + offset]
+    cdef double h0 = knots[1] - knots[0], h1 = knots[2] - knots[1]
+    cdef double h2 = knots[3 + offset] - knots[2], h3 = knots[4 + offset] - knots[3 + offset]
+    cdef double h4 = knots[5 + offset] - knots[4 + offset]
     cdef double m0 = (quantiles[1] - quantiles[0]) / h0, m1 = (quantiles[2] - quantiles[1]) / h1
-    cdef double m2 = (quantiles[3] - quantiles[2]) / h2, m3 = (quantiles[4] - quantiles[3]) / h3
-    cdef double m4 = (quantiles[5] - quantiles[4]) / h4
+    cdef double m2 = (quantiles[3 + offset] - quantiles[2]) / h2
+    cdef double m3 = (quantiles[4 + offset] - quantiles[3 + offset]) / h3
+    cdef double m4 = (quantiles[5 + offset] - quantiles[4 + offset]) / h4
     cdef double dydx0 = _get_dydx_2(h0, h1, m0, m1)
     cdef double dydx1 = _get_dydx_1(h1, h0, m1, m0)
     cdef double dydx2 = _get_dydx_1(h3, h4, m3, m4)
@@ -325,11 +329,11 @@ cdef double _get_dydx_2(double h0, double h1, double m0, double m1) nogil:
 @cython.cdivision(True)
 cdef void _get_types(int* types):
     if types[1] == UNDEFINED:
-        if types[0] != DOUBLE_EXP and types[2] != DOUBLE_EXP:
+        if types[0] not in (DOUBLE_EXP, MERGE_EXP) and types[2] not in (DOUBLE_EXP, MERGE_EXP):
             types[1] = NORMAL_CUBIC
-        elif types[0] == DOUBLE_EXP and types[2] != DOUBLE_EXP:
+        elif types[0] in (DOUBLE_EXP, MERGE_EXP) and types[2] not in (DOUBLE_EXP, MERGE_EXP):
             types[1] = LEFT_END_CUBIC
-        elif types[0] != DOUBLE_EXP and types[2] == DOUBLE_EXP:
+        elif types[0] not in (DOUBLE_EXP, MERGE_EXP) and types[2] in (DOUBLE_EXP, MERGE_EXP):
             types[1] = RIGHT_END_CUBIC
         else:
             types[1] = LINEAR
@@ -338,34 +342,44 @@ cdef void _get_types(int* types):
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-def get_split_factors(double[::1] split_factors, const double[::1] knots,
-                      const double[::1] quantiles, int n_interval, int i_start, int i_end):
+def get_split_factors(double[::1] split_factors, double[::1] split_factors_2,
+                      const double[::1] knots, const double[::1] quantiles, int n_interval,
+                      int i_start, int i_end):
     if i_start < 2:
         i_start = 2
     if i_end > n_interval - 2:
         i_end = n_interval - 2
     _get_split_factors(&split_factors[i_start], &knots[i_start - 2], &quantiles[i_start - 2],
                        i_end - i_start)
+    _get_split_factors(&split_factors_2[i_start], &knots[i_start - 2], &quantiles[i_start - 2],
+                       i_end - i_start - 1, 2)
 
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-def get_types(int[::1] types, const double[::1] split_factors, int n_interval, int i_start,
-              int i_end, double split_threshold):
+def get_types(int[::1] types, const double[::1] split_factors, const double[::1] split_factors_2,
+              int n_interval, int i_start, int i_end, double split_threshold):
     cdef size_t i
     for i in range(_max(i_start, 2), _min(i_end, n_interval - 2)):
         if split_factors[i] < fmin(split_threshold, fmin(split_factors[i - 1],
                                                          split_factors[i + 1])):
             types[i] = DOUBLE_EXP
     for i in range(_max(i_start, 2), _min(i_end, n_interval - 2)):
+        if split_factors_2[i] < fmin(split_threshold,
+                                     fmin(fmin(split_factors_2[i - 2], split_factors_2[i - 1]),
+                                          fmin(split_factors_2[i + 1], split_factors_2[i + 2]))):
+            types[i] = DOUBLE_EXP
+            types[i + 1] = MERGE_EXP
+    for i in range(_max(i_start, 2), _min(i_end, n_interval - 2)):
         _get_types(&types[i - 1])
     if i_start < 2:
         types[0] = LEFT_END_EXP
-        types[1] = LEFT_END_CUBIC if types[2] != DOUBLE_EXP else LINEAR
+        types[1] = LEFT_END_CUBIC if types[2] not in (DOUBLE_EXP, RIGHT_END_EXP) else LINEAR
     if i_end > n_interval - 2:
         types[n_interval - 1] = RIGHT_END_EXP
-        types[n_interval - 2] = RIGHT_END_CUBIC if types[n_interval - 3] != DOUBLE_EXP else LINEAR
+        types[n_interval - 2] = (RIGHT_END_CUBIC if types[n_interval - 3] not in
+                                 (DOUBLE_EXP, LEFT_END_EXP, MERGE_EXP) else LINEAR)
 
 
 @cython.wraparound(False)

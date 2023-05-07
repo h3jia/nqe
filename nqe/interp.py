@@ -14,6 +14,7 @@ LINEAR = 4
 DOUBLE_EXP = 5
 LEFT_END_EXP = 6
 RIGHT_END_EXP = 7
+MERGE_EXP = 8
 
 
 class Interp1D:
@@ -21,13 +22,19 @@ class Interp1D:
         self.knots = np.asarray(knots, dtype=float).reshape(-1)
         self.quantiles = np.asarray(quantiles, dtype=float).reshape(-1)
         assert self.knots.shape == self.quantiles.shape
+        assert self.knots.size >= 4
         assert self.quantiles[0] == 0.
         assert self.quantiles[-1] == 1.
         self.n_interval = self.knots.size - 1
         assert self.n_interval >= 4
+        self._knots = np.copy(self.knots)         # make a copy since some intervals
+        self._quantiles = np.copy(self.quantiles) # can be merged
         self.split_factors = np.full(self.n_interval, np.nan)
         self.split_factors[:2] = np.inf
         self.split_factors[-2:] = np.inf
+        self.split_factors_2 = np.full(self.n_interval - 1, np.nan)
+        self.split_factors_2[:2] = np.inf
+        self.split_factors_2[-2:] = np.inf
         self.types = np.full(self.n_interval, UNDEFINED, dtype=np.int32)
         # self.types[0] = LEFT_END_EXP
         # self.types[-1] = RIGHT_END_EXP
@@ -38,10 +45,19 @@ class Interp1D:
 
     def set_interval(self, i_start, i_end):
         assert i_start >= 0 and i_end <= self.n_interval and i_start < i_end
-        get_split_factors(self.split_factors, self.knots, self.quantiles, self.n_interval,
-                          max(i_start - 2, 2), min(i_end + 2, self.n_interval - 2))
-        get_types(self.types, self.split_factors, self.n_interval, i_start - 1, i_end + 1,
-                  self.split_threshold)
+        get_split_factors(self.split_factors, self.split_factors_2, self.knots, self.quantiles,
+                          self.n_interval, max(i_start - 4, 2), min(i_end + 4, self.n_interval - 2))
+        get_types(self.types, self.split_factors, self.split_factors_2, self.n_interval,
+                  i_start - 2, i_end + 2, self.split_threshold)
+        i_merge = np.where(self.types == MERGE_EXP)[0]
+        if i_merge.size > 0:
+            self.knots = np.delete(self.knots, i_merge)
+            self.quantiles = np.delete(self.quantiles, i_merge)
+            self.n_interval -= i_merge.size
+            self.types = np.delete(self.types, i_merge)
+            self.dydxs = np.delete(self.dydxs, i_merge)
+            self.dpdxs = np.delete(self.dpdxs, i_merge)
+            self.expas = np.delete(self.expas, i_merge, axis=0)
         get_dydxs(self.dydxs, self.knots, self.quantiles, self.types, self.n_interval, i_start,
                   i_end)
         get_exps(self.expas, self.dpdxs, self.knots, self.quantiles, self.dydxs, self.types,
