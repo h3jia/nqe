@@ -551,14 +551,56 @@ def get_pdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
+cdef inline double _cdf_cubic(double t, double h, double y0, double y1, double dydx0,
+                              double dydx1) nogil:
+    t /= h
+    return (
+        (2. * t * t * t - 3. * t * t + 1.) * y0 +
+        (t * t * t - 2. * t * t + t) * h * dydx0 +
+        (-2. * t * t * t + 3. * t * t) * y1 +
+        (t * t * t - t * t) * h * dydx1
+    )
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef inline double _cdf_double_exp(double t, double h, double y0, double y1, double dydx0,
+                                   double dydx1, double dpdx0, double dpdx1, double expa0,
+                                   double expa1) nogil:
+    return (
+        0.5 * (y0 + y1) +
+        _int_p_dx(expa0, t, dydx0, dpdx0, 0.) -
+        _int_p_dx(expa1, h - t, dydx1, -dpdx1, 0.)
+    )
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef inline double _cdf_left_exp(double t, double y, double dydx, double dpdx, double expa) nogil:
+    # note the different def of t
+    return y - _int_p_dx(expa, t, dydx, -dpdx, 0.)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef inline double _cdf_right_exp(double t, double y, double dydx, double dpdx, double expa) nogil:
+    return y + _int_p_dx(expa, t, dydx, dpdx, 0.)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
 def get_cdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
             const double[::1] quantiles, const double[::1] dydxs, const double[::1] dpdxs,
             const double[:, ::1] expas, const int[::1] types, int n_point, int n_interval):
     cdef size_t i
     cdef int *j = <int *> malloc(n_point * sizeof(int))
-    cdef double *h = <double *> malloc(n_point * sizeof(double))
-    cdef double *t = <double *> malloc(n_point * sizeof(double))
-    if not j or not h or not t:
+    # cdef double *h = <double *> malloc(n_point * sizeof(double))
+    # cdef double *t = <double *> malloc(n_point * sizeof(double))
+    if not j: # or not h or not t:
         raise MemoryError('cannot malloc required array in get_pdf.')
     try:
         for i in range(n_point): # prange(n_point, nogil=True, schedule='static'):
@@ -566,28 +608,22 @@ def get_cdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
             if j[i] >= 0 and j[i] <= n_interval - 1:
                 if (types[j[i]] == NORMAL_CUBIC or types[j[i]] == LEFT_END_CUBIC or
                     types[j[i]] == RIGHT_END_CUBIC or types[j[i]] == LINEAR):
-                    h[i] = knots[j[i] + 1] - knots[j[i]]
-                    t[i] = (xs[i] - knots[j[i]]) / h[i]
-                    ys[i] = (
-                        (2. * t[i] * t[i] * t[i] - 3. * t[i] * t[i] + 1.) * quantiles[j[i]] +
-                        (t[i] * t[i] * t[i] - 2. * t[i] * t[i] + t[i]) * h[i] * dydxs[j[i]] +
-                        (-2. * t[i] * t[i] * t[i] + 3. * t[i] * t[i]) * quantiles[j[i] + 1] +
-                        (t[i] * t[i] * t[i] - t[i] * t[i]) * h[i] * dydxs[j[i] + 1]
+                    ys[i] = _cdf_cubic(
+                        xs[i] - knots[j[i]], knots[j[i] + 1] - knots[j[i]], quantiles[j[i]],
+                        quantiles[j[i] + 1], dydxs[j[i]], dydxs[j[i] + 1]
                     )
                 elif types[j[i]] == DOUBLE_EXP:
-                    ys[i] = 0.5 * (quantiles[j[i]] + quantiles[j[i] + 1])
-                    ys[i] += _int_p_dx(expas[j[i], 0], xs[i] - knots[j[i]], dydxs[j[i]],
-                                       dpdxs[j[i]], 0.)
-                    ys[i] -= _int_p_dx(expas[j[i], 1], knots[j[i] + 1] - xs[i], dydxs[j[i] + 1],
-                                       -dpdxs[j[i] + 1], 0.)
+                    ys[i] = _cdf_double_exp(
+                        xs[i] - knots[j[i]], knots[j[i] + 1] - knots[j[i]], quantiles[j[i]],
+                        quantiles[j[i] + 1], dydxs[j[i]], dydxs[j[i] + 1], dpdxs[j[i]],
+                        dpdxs[j[i] + 1], expas[j[i], 0], expas[j[i], 1]
+                    )
                 elif types[j[i]] == LEFT_END_EXP:
-                    ys[i] = quantiles[j[i] + 1]
-                    ys[i] -= _int_p_dx(expas[j[i], 1], knots[j[i] + 1] - xs[i], dydxs[j[i] + 1],
-                                       -dpdxs[j[i] + 1], 0.)
+                    ys[i] = _cdf_left_exp(knots[j[i] + 1] - xs[i], quantiles[j[i] + 1],
+                                          dydxs[j[i] + 1], dpdxs[j[i] + 1], expas[j[i], 1])
                 elif types[j[i]] == RIGHT_END_EXP:
-                    ys[i] = quantiles[j[i]]
-                    ys[i] += _int_p_dx(expas[j[i], 0], xs[i] - knots[j[i]], dydxs[j[i]],
-                                       dpdxs[j[i]], 0.)
+                    ys[i] = _cdf_right_exp(xs[i] - knots[j[i]], quantiles[j[i]], dydxs[j[i]],
+                                           dpdxs[j[i]], expas[j[i], 0])
                 else:
                     ys[i] = nan
                 if ys[i] < 0.:
@@ -603,8 +639,8 @@ def get_cdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
 
     finally:
         free(j)
-        free(h)
-        free(t)
+        # free(h)
+        # free(t)
 
 
 """@cython.wraparound(False)
@@ -626,7 +662,7 @@ def get_ppf(double[::1] xs, const double[::1] ys, const double[::1] knots,
             elif ys[i] == 1:
                 xs[i] = knots[n_interval]
             else:
-                j[i] = find_interval(&knots[0], n_interval + 1, xs[i]) - 1
+                j[i] = find_interval(&quantiles[0], n_interval + 1, ys[i]) - 1
                 if j[i] >= 0 and j[i] <= n_interval - 1:
                     if (types[j[i]] == NORMAL_CUBIC or types[j[i]] == LEFT_END_CUBIC or
                         types[j[i]] == RIGHT_END_CUBIC or types[j[i]] == LINEAR):
