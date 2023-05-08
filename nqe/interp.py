@@ -1,5 +1,5 @@
 import numpy as np
-from ._interp import get_split_factors, get_types, get_dydxs, get_exps, get_pdf, get_cdf
+from ._interp import get_split_factors, get_types, get_dydxs, get_exps, get_pdf, get_cdf, get_ppf
 
 
 __all__ = ['Interp1D']
@@ -66,12 +66,12 @@ class Interp1D:
     def set_all(self):
         self.set_interval(0, self.n_interval)
 
-    def check(self, x):
+    def check(self, x, target='knots'):
         xmin = np.min(x)
         xmax = np.max(x)
         # assert xmin >= self.knots[0] and xmax <= self.knots[-1]
-        imin = np.searchsorted(self.knots, xmin)
-        imax = np.searchsorted(self.knots, xmax)
+        imin = np.searchsorted(eval('self.' + target), xmin)
+        imax = np.searchsorted(eval('self.' + target), xmax)
         if not np.all(self.types[imin:(imax + 1)]):
             self.set_interval(imin, imax + 1)
 
@@ -79,7 +79,7 @@ class Interp1D:
         x = np.asarray(x, dtype=float)
         if x.ndim <= 1 and x.size > 0:
             if check:
-                self.check(x)
+                self.check(x, 'knots')
             out = np.empty_like(np.atleast_1d(x))
             get_pdf(np.atleast_1d(x), out, self.knots, self.quantiles, self.dydxs, self.dpdxs,
                     self.expas, self.types, out.size, self.n_interval)
@@ -91,7 +91,7 @@ class Interp1D:
         x = np.asarray(x, dtype=float)
         if x.ndim <= 1 and x.size > 0:
             if check:
-                self.check(x)
+                self.check(x, 'knots')
             out = np.empty_like(np.atleast_1d(x))
             get_cdf(np.atleast_1d(x), out, self.knots, self.quantiles, self.dydxs, self.dpdxs,
                     self.expas, self.types, out.size, self.n_interval)
@@ -99,5 +99,21 @@ class Interp1D:
         else:
             raise NotImplementedError
 
-    def solve(self, quantile):
-        assert 0. <= quantile <= 1.
+    def ppf(self, y, check=True):
+        y = np.asarray(y, dtype=float)
+        if y.ndim <= 1 and y.size > 0:
+            if check:
+                self.check(y, 'quantiles')
+            out = np.empty_like(np.atleast_1d(y))
+            get_ppf(out, np.atleast_1d(y), self.knots, self.quantiles, self.dydxs, self.dpdxs,
+                    self.expas, self.types, out.size, self.n_interval)
+            return out if y.ndim == 1 else float(out)
+        else:
+            raise NotImplementedError
+
+    def sample(self, size=1, random_seed=None, check=True):
+        if random_seed is not None:
+            np.random.seed(random_seed)
+        if not isinstance(size, int):
+            raise NotImplementedError
+        return self.ppf(np.random.uniform(size=size), check)

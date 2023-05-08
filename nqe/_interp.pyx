@@ -12,7 +12,8 @@ cdef extern from "numpy/npy_math.h":
     double inf "NPY_INFINITY"
 
 
-__all__ = ['get_split_factors', 'get_types', 'get_dydxs', 'get_exps', 'get_pdf', 'get_cdf']
+__all__ = ['get_split_factors', 'get_types', 'get_dydxs', 'get_exps', 'get_pdf', 'get_cdf',
+           'get_ppf']
 
 
 ctypedef struct int_p_dx_params_expa:
@@ -25,6 +26,18 @@ ctypedef struct int_p_dx_params_dpdx:
     double h
     double p0
     double mass
+
+ctypedef struct cdf_params:
+    double y
+    double h
+    double y0
+    double y1
+    double dydx0
+    double dydx1
+    double dpdx0
+    double dpdx1
+    double expa0
+    double expa1
 
 cdef double XTOL = 1e-10, RTOL = 1e-10
 cdef int MITR = 300
@@ -565,6 +578,14 @@ cdef inline double _cdf_cubic(double t, double h, double y0, double y1, double d
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
+cdef double _cdf_cubic_args(double t, void *args):
+    cdef cdf_params *myargs = <cdf_params *> args
+    return _cdf_cubic(t, myargs.h, myargs.y0, myargs.y1, myargs.dydx0, myargs.dydx1) - myargs.y
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
 cdef inline double _cdf_double_exp(double t, double h, double y0, double y1, double dydx0,
                                    double dydx1, double dpdx0, double dpdx1, double expa0,
                                    double expa1) nogil:
@@ -578,9 +599,26 @@ cdef inline double _cdf_double_exp(double t, double h, double y0, double y1, dou
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
+cdef double _cdf_double_exp_args(double t, void *args):
+    cdef cdf_params *myargs = <cdf_params *> args
+    return _cdf_double_exp(t, myargs.h, myargs.y0, myargs.y1, myargs.dydx0, myargs.dydx1,
+                           myargs.dpdx0, myargs.dpdx1, myargs.expa0, myargs.expa1) - myargs.y
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
 cdef inline double _cdf_left_exp(double t, double y, double dydx, double dpdx, double expa) nogil:
     # note the different def of t
     return y - _int_p_dx(expa, t, dydx, -dpdx, 0.)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef double _cdf_left_exp_args(double t, void *args):
+    cdef cdf_params *myargs = <cdf_params *> args
+    return _cdf_left_exp(t, myargs.y1, myargs.dydx1, myargs.dpdx1, myargs.expa1) - myargs.y
 
 
 @cython.wraparound(False)
@@ -593,14 +631,20 @@ cdef inline double _cdf_right_exp(double t, double y, double dydx, double dpdx, 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
+cdef double _cdf_right_exp_args(double t, void *args):
+    cdef cdf_params *myargs = <cdf_params *> args
+    return _cdf_right_exp(t, myargs.y0, myargs.dydx0, myargs.dpdx0, myargs.expa0) - myargs.y
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
 def get_cdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
             const double[::1] quantiles, const double[::1] dydxs, const double[::1] dpdxs,
             const double[:, ::1] expas, const int[::1] types, int n_point, int n_interval):
     cdef size_t i
     cdef int *j = <int *> malloc(n_point * sizeof(int))
-    # cdef double *h = <double *> malloc(n_point * sizeof(double))
-    # cdef double *t = <double *> malloc(n_point * sizeof(double))
-    if not j: # or not h or not t:
+    if not j:
         raise MemoryError('cannot malloc required array in get_pdf.')
     try:
         for i in range(n_point): # prange(n_point, nogil=True, schedule='static'):
@@ -639,11 +683,9 @@ def get_cdf(const double[::1] xs, double[::1] ys, const double[::1] knots,
 
     finally:
         free(j)
-        # free(h)
-        # free(t)
 
 
-"""@cython.wraparound(False)
+@cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
 def get_ppf(double[::1] xs, const double[::1] ys, const double[::1] knots,
@@ -651,9 +693,8 @@ def get_ppf(double[::1] xs, const double[::1] ys, const double[::1] knots,
             const double[:, ::1] expas, const int[::1] types, int n_point, int n_interval):
     cdef size_t i
     cdef int *j = <int *> malloc(n_point * sizeof(int))
-    cdef double *h = <double *> malloc(n_point * sizeof(double))
-    cdef double *t = <double *> malloc(n_point * sizeof(double))
-    if not j or not h or not t:
+    cdef cdf_params *p = <cdf_params *> malloc(n_point * sizeof(cdf_params))
+    if not j or not p:
         raise MemoryError('cannot malloc required array in get_pdf.')
     try:
         for i in range(n_point): # prange(n_point, nogil=True, schedule='static'):
@@ -664,36 +705,33 @@ def get_ppf(double[::1] xs, const double[::1] ys, const double[::1] knots,
             else:
                 j[i] = find_interval(&quantiles[0], n_interval + 1, ys[i]) - 1
                 if j[i] >= 0 and j[i] <= n_interval - 1:
+                    p[i] = {'y': ys[i], 'h': knots[j[i] + 1] - knots[j[i]], 'y0': quantiles[j[i]],
+                            'y1': quantiles[j[i] + 1], 'dydx0': dydxs[j[i]],
+                            'dydx1': dydxs[j[i] + 1], 'dpdx0': dpdxs[j[i]],
+                            'dpdx1': dpdxs[j[i] + 1], 'expa0': expas[j[i], 0],
+                            'expa1': expas[j[i], 1]}
                     if (types[j[i]] == NORMAL_CUBIC or types[j[i]] == LEFT_END_CUBIC or
                         types[j[i]] == RIGHT_END_CUBIC or types[j[i]] == LINEAR):
-                        h[i] = knots[j[i] + 1] - knots[j[i]]
-                        t[i] = (xs[i] - knots[j[i]]) / h[i]
-                        ys[i] = (
-                            (2. * t[i] * t[i] * t[i] - 3. * t[i] * t[i] + 1.) * quantiles[j[i]] +
-                            (t[i] * t[i] * t[i] - 2. * t[i] * t[i] + t[i]) * h[i] * dydxs[j[i]] +
-                            (-2. * t[i] * t[i] * t[i] + 3. * t[i] * t[i]) * quantiles[j[i] + 1] +
-                            (t[i] * t[i] * t[i] - t[i] * t[i]) * h[i] * dydxs[j[i] + 1]
-                        )
+                        xs[i] = knots[j[i]] + brentq(_cdf_cubic_args, 0.,
+                                                     knots[j[i] + 1] - knots[j[i]], &p[i], XTOL,
+                                                     RTOL, MITR, NULL)
                     elif types[j[i]] == DOUBLE_EXP:
-                        ys[i] = 0.5 * (quantiles[j[i]] + quantiles[j[i] + 1])
-                        ys[i] += _int_p_dx(expas[j[i], 0], xs[i] - knots[j[i]], dydxs[j[i]],
-                                           dpdxs[j[i]], 0.)
-                        ys[i] -= _int_p_dx(expas[j[i], 1], knots[j[i] + 1] - xs[i], dydxs[j[i] + 1],
-                                           -dpdxs[j[i] + 1], 0.)
+                        xs[i] = knots[j[i]] + brentq(_cdf_double_exp_args, 0.,
+                                                     knots[j[i] + 1] - knots[j[i]], &p[i], XTOL,
+                                                     RTOL, MITR, NULL)
                     elif types[j[i]] == LEFT_END_EXP:
-                        ys[i] = quantiles[j[i] + 1]
-                        ys[i] -= _int_p_dx(expas[j[i], 1], knots[j[i] + 1] - xs[i], dydxs[j[i] + 1],
-                                           -dpdxs[j[i] + 1], 0.)
+                        xs[i] = knots[j[i] + 1] - brentq(_cdf_left_exp_args, 0.,
+                                                         knots[j[i] + 1] - knots[j[i]], &p[i], XTOL,
+                                                         RTOL, MITR, NULL)
                     elif types[j[i]] == RIGHT_END_EXP:
-                        ys[i] = quantiles[j[i]]
-                        ys[i] += _int_p_dx(expas[j[i], 0], xs[i] - knots[j[i]], dydxs[j[i]],
-                                           dpdxs[j[i]], 0.)
+                        xs[i] = knots[j[i]] + brentq(_cdf_right_exp_args, 0.,
+                                                     knots[j[i] + 1] - knots[j[i]], &p[i], XTOL,
+                                                     RTOL, MITR, NULL)
                     else:
-                        ys[i] = nan
+                        xs[i] = nan
                 else:
                     xs[i] = nan
 
     finally:
         free(j)
-        free(h)
-        free(t)"""
+        free(p)
