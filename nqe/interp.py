@@ -65,13 +65,15 @@ class Interp1D:
 
     def set_all(self):
         self.set_interval(0, self.n_interval)
+        return self
 
     def check(self, x, target='knots'):
         xmin = np.min(x)
         xmax = np.max(x)
         # assert xmin >= self.knots[0] and xmax <= self.knots[-1]
-        imin = np.searchsorted(eval('self.' + target), xmin)
-        imax = np.searchsorted(eval('self.' + target), xmax)
+        imin = max(np.searchsorted(eval('self.' + target), xmin, side='right') - 1, 0)
+        imax = min(np.searchsorted(eval('self.' + target), xmax, side='right') - 1,
+                   self.n_interval - 1)
         if not np.all(self.types[imin:(imax + 1)]):
             self.set_interval(imin, imax + 1)
 
