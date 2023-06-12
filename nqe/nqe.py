@@ -152,7 +152,7 @@ class NQE:
                  input_rescaling=True, loss_rescaling=True, lambda_reg=0., training_batch_size=100,
                  optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None,
                  learning_rate_decay_period=5, learning_rate_decay_gamma=0.9,
-                 validation_fraction=0.15, stop_after_epochs=20):
+                 validation_fraction=0.15, stop_after_epochs=20, max_epoches=np.inf):
         self.quantiles = np.asarray(quantiles)
         self.lows = np.atleast_1d(lows)
         self.highs = np.atleast_1d(highs)
@@ -178,7 +178,7 @@ class NQE:
         self.shortcut = bool(shortcut)
         self.input_rescaling = bool(input_rescaling)
         self.loss_rescaling = bool(loss_rescaling)
-        self.lambda_reg = float(lambda_reg)
+        self.lambda_reg = np.asarray(lambda_reg)
         self.training_batch_size = training_batch_size
         self.optimizer = optimizer
         self.learning_rate = learning_rate
@@ -190,6 +190,7 @@ class NQE:
         self.learning_rate_decay_gamma = learning_rate_decay_gamma
         self.validation_fraction = validation_fraction
         self.stop_after_epochs = stop_after_epochs
+        self.max_epoches = max_epoches
         self.mlp_list = []
 
     def set_dim(self, x):
@@ -278,9 +279,9 @@ class NQE:
         train_data = TrainData()
         valid_data = ValidData()
         train_loader = DataLoader(dataset=train_data, batch_size=self.training_batch_size,
-                                  num_workers=1, pin_memory=True, shuffle=True, drop_last=True)
+                                  pin_memory=True, shuffle=True, drop_last=True)
         valid_loader = DataLoader(dataset=valid_data, batch_size=self.training_batch_size,
-                                  num_workers=1, pin_memory=True, shuffle=False, drop_last=False)
+                                  pin_memory=True, shuffle=False, drop_last=False)
         optimizer = eval('torch.optim.' + self.optimizer)
         optimizer = optimizer(model.parameters(), lr=self.learning_rate, **self.optimizer_kwargs)
         scheduler = torch.optim.lr_scheduler.StepLR(
@@ -302,7 +303,11 @@ class NQE:
                 # print(in_now.dtype)
                 y = model(in_now, return_raw=True)
                 loss_0 = self.loss(y[0], out_now) / out_std
-                loss_1 = self.lambda_reg * torch.mean(y[1]**2) if self.lambda_reg > 0. else torch.tensor(0.)
+                if self.lambda_reg.size == 1:
+                    lambda_now = float(self.lambda_reg)
+                else:
+                    lambda_now = float(self.lambda_reg[i])
+                loss_1 = lambda_now * torch.mean(y[1]**2) if lambda_now > 0. else torch.tensor(0.)
                 loss_now = loss_0 + loss_1
                 optimizer.zero_grad()
                 loss_now.backward()
@@ -326,7 +331,11 @@ class NQE:
                     # theta_now = theta_now.to(device)
                     y = model(in_now, return_raw=True)
                     loss_0 = self.loss(y[0], out_now) / out_std
-                    loss_1 = self.lambda_reg * torch.mean(y[1]**2) if self.lambda_reg > 0. else torch.tensor(0.)
+                    if self.lambda_reg.size == 1:
+                        lambda_now = float(self.lambda_reg)
+                    else:
+                        lambda_now = float(self.lambda_reg[i])
+                    loss_1 = lambda_now * torch.mean(y[1]**2) if lambda_now > 0. else torch.tensor(0.)
                     loss_now = loss_0 + loss_1
                     loss_valid_0 += loss_0.detach().numpy() * in_now.shape[0]
                     loss_valid_1 += loss_1.detach().numpy() * in_now.shape[0]
@@ -377,6 +386,8 @@ class NQE:
         if (len(valid_loss) > self.stop_after_epochs and
             np.nanmin(valid_loss[:-self.stop_after_epochs, 2]) <=
             np.nanmin(valid_loss[-self.stop_after_epochs:, 2])):
+            return True
+        elif valid_loss.shape[0] >= self.max_epoches:
             return True
         else:
             return False
