@@ -113,9 +113,11 @@ class Interp1D:
         else:
             raise NotImplementedError
 
-    def sample(self, size=1, random_seed=None, check=True):
-        if random_seed is not None:
-            np.random.seed(random_seed)
-        if not isinstance(size, int):
+    def sample(self, n=1, random_seed=None, sobol=True, check=True):
+        if not isinstance(n, int):
             raise NotImplementedError
-        return self.ppf(np.random.uniform(size=size), check)
+        if sobol:
+            return self.ppf(scipy.stats.qmc.Sobol(
+                1, scramble=True, seed=random_seed, bits=64).random(n).flatten(), check)
+        else:
+            return self.ppf(np.random.default_rng(random_seed).uniform(size=n), check)

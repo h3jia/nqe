@@ -71,7 +71,7 @@ setup(
     # url='https://github.com/h3jia/nqe',
     license='Apache License, Version 2.0',
     python_requires=">=3.7",
-    install_requires=['cython', 'extension-helpers', 'numpy>=1.17', 'scipy'],
+    install_requires=['cython', 'extension-helpers', 'numpy>=1.17', 'scipy>=1.9'],
     packages=find_packages(),
     # package_data={'bayesfast': ['utils/new-joe-kuo-6.21201']},
     ext_modules=cythonize(ext_modules, language_level="3"),

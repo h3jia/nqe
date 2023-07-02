@@ -5,11 +5,21 @@ from torch.utils.data import Dataset, DataLoader
 from typing import Type, Any, Callable, Union, List, Optional, Tuple
 from .interp import Interp1D
 
-__all__ = ['QuantileLoss', 'MLP', 'QuantileMLP1D', 'NQE']
+__all__ = ['QuantileLoss', 'MLP', 'QuantileNet1D', 'NQE']
 
 
 class QuantileLoss:
+    """
+    Weighted L1 loss for quantile prediction.
 
+    Parameters
+    ----------
+    quantiles : 1-d array_like
+        The quantiles you want to predict, should be larger than 0 and smaller than 1.
+    alpha : float, optional
+        Each term in the loss will be weighted by ``exp(alpha * abs(quantile - 0.5))``. Set to
+        ``0.`` by default.
+    """
     def __init__(self, quantiles, alpha=0.):
         self.quantiles = torch.as_tensor(quantiles, dtype=torch.float)
         self.alpha = float(alpha)
@@ -30,55 +40,119 @@ class QuantileLoss:
 
 
 class MLP(nn.Module):
+    """
+    Basic MLP module.
 
-    def __init__(self, in_features, out_features, add_fc, nonlinear='relu', batch_norm=False,
-                 shortcut=True):
+    Parameters
+    ----------
+    input_neurons : int
+        The number of input neurons. When ``embedding_net`` is not ``None``, this should match
+        the `output` dimension of ``embedding_net`` plus the dimension of any additional
+        predictor variables.
+    output_neurons : int
+        The number of output neurons.
+    hidden_neurons : None, int, 1-d array_like of int
+        The number(s) of neurons in the hidden layer(s). If ``None``, no hidden layers will be
+        added.
+    activation : str or nn.Module, optional
+        The non-linear activation function. If ``str``, should be among ``'tanh', 'relu',
+        'leakyrelu', 'elu'``. Set to ``'relu'`` by default.
+    batch_norm : bool, optional
+        Whether to add batch normalization before each non-linear activation function. Set to
+        ``False`` by default.
+    shortcut : bool, optional
+        Whether to add shortcut connections, i.e. the input layer will be concatenated with
+        each hidden layer. Set to ``True`` by default.
+    embedding_net : None or nn.Module, optional
+        Additional embedding network before the MLP layers. Set to ``None`` by default. The
+        output should be a flattened 1-dim tensor.
+    """
+    def __init__(self, input_neurons, output_neurons, hidden_neurons, activation='relu',
+                 batch_norm=False, shortcut=True, embedding_net=None):
         super(MLP, self).__init__()
-        self._make_fc(in_features, out_features, add_fc, nonlinear, batch_norm, shortcut)
+        self._make_fc(input_neurons, output_neurons, hidden_neurons, activation, batch_norm,
+                      shortcut)
+        if isinstance(embedding_net, nn.Module) or embedding_net is None:
+            self.embedding_net = embedding_net
+        else:
+            raise ValueError
         self.mu = 0.
         self.sigma = 1.
 
-    def _make_fc(self, in_features: int, out_features: int, add_fc: Optional[List[int]],
-                 nonlinear: str = 'tanh', batch_norm: bool = True, shortcut: bool = True):
-        if nonlinear.lower() == 'tanh':
-            self.nonlinear = nn.Tanh()
-        elif nonlinear.lower() == 'relu':
-            self.nonlinear = nn.ReLU()
-        elif nonlinear.lower() == 'leakyrelu':
-            self.nonlinear = nn.LeakyReLU()
-        elif nonlinear.lower() == 'elu':
-            self.nonlinear = nn.ELU()
+    def _make_fc(self, input_neurons, output_neurons, hidden_neurons, activation, batch_norm,
+                 shortcut):
+        if isinstance(activation, nn.Module):
+            self.activation = activation
+        elif isinstance(activation, str):
+            if activation.lower() == 'tanh':
+                self.activation = nn.Tanh()
+            elif activation.lower() == 'relu':
+                self.activation = nn.ReLU()
+            elif activation.lower() == 'leakyrelu':
+                self.activation = nn.LeakyReLU()
+            elif activation.lower() == 'elu':
+                self.activation = nn.ELU()
+            else:
+                raise ValueError
         else:
-            raise NotImplementedError
+            raise ValueError
         self.fc_layers = nn.ModuleList()
         self.bn_layers = nn.ModuleList()
         self.batch_norm = bool(batch_norm)
         self.shortcut = bool(shortcut)
-        if add_fc is None:
-            self.fc_layers.append(nn.Linear(in_features, out_features))
+        if hidden_neurons is None:
+            self.fc_layers.append(nn.Linear(input_neurons, output_neurons))
         else:
-            add_fc = list(add_fc)
-            add_fc.insert(0, in_features)
-            add_fc.append(out_features)
-            self.fc_layers.append(nn.Linear(add_fc[0], add_fc[1]))
+            hidden_neurons = list(hidden_neurons)
+            hidden_neurons.insert(0, input_neurons)
+            hidden_neurons.append(output_neurons)
+            self.fc_layers.append(nn.Linear(hidden_neurons[0], hidden_neurons[1]))
             if batch_norm:
-                self.bn_layers.append(nn.BatchNorm1d(add_fc[1]))
-            # pass thru nonlinear, concat with shortcut
-            k = add_fc[0] if shortcut else 0
-            for i in range(1, len(add_fc) - 2):
-                self.fc_layers.append(nn.Linear(add_fc[i] + k, add_fc[i + 1]))
+                self.bn_layers.append(nn.BatchNorm1d(hidden_neurons[1]))
+            # pass thru activation, concat with shortcut
+            k = hidden_neurons[0] if shortcut else 0
+            for i in range(1, len(hidden_neurons) - 2):
+                self.fc_layers.append(nn.Linear(hidden_neurons[i] + k, hidden_neurons[i + 1]))
                 if batch_norm:
-                    self.bn_layers.append(nn.BatchNorm1d(add_fc[i + 1]))
-                # pass thru nonlinear, concat with shortcut
-            self.fc_layers.append(nn.Linear(add_fc[-2] + k, add_fc[-1]))
+                    self.bn_layers.append(nn.BatchNorm1d(hidden_neurons[i + 1]))
+                # pass thru activation, concat with shortcut
+            self.fc_layers.append(nn.Linear(hidden_neurons[-2] + k, hidden_neurons[-1]))
 
-    def set_whitening(self, x):
-        self.mu = torch.mean(x, axis=0).detach()
-        self.sigma = torch.std(x, axis=0)
-        self.sigma = torch.where(self.sigma > 0., self.sigma, 1e-12).detach()
+    def set_rescaling(self, x_0):
+        """
+        Set the optional rescaling for x_0.
+        """
+        self.mu = torch.mean(x_0, axis=0).detach()
+        self.sigma = torch.std(x_0, axis=0)
+        self.sigma = torch.where(self.sigma > 0., self.sigma, 1e-10).detach()
 
-    def _forward(self, x):
-        x = (x - self.mu) / self.sigma
+    def _forward(self, x_0=None, x_1=None):
+        """
+        The forward computation of the model.
+
+        Parameters
+        ----------
+        x_0 : Tensor or None, optional
+            The input variables to be directly passed to the MLP. Set to ``None`` by default.
+        x_1 : Tensor or None, optional
+            The input variables to be first passed to the embedding network. Set to ``None``
+            by default.
+
+        Notes
+        -----
+        ``x_0`` and ``x_1`` cannot both be None.
+        """
+        if x_0 is not None and x_1 is not None:
+            x_0 = (x_0 - self.mu) / self.sigma
+            x_1 = self.embedding_net(x_1) if self.embedding_net is not None else x_1
+            x = torch.concat((x_0, x_1), dim=-1)
+        elif x_0 is not None and x_1 is None:
+            x = (x_0 - self.mu) / self.sigma
+        elif x_0 is None and x_1 is not None:
+            x = self.embedding_net(x_1) if self.embedding_net is not None else x_1
+        else:
+            raise ValueError
+
         if len(self.fc_layers) == 1:
             return self.fc_layers[0](x)
         elif len(self.fc_layers) > 1:
@@ -87,14 +161,14 @@ class MLP(nn.Module):
             x = self.fc_layers[0](x)
             if self.batch_norm:
                 x = self.bn_layers[0](x)
-            x = self.nonlinear(x)
+            x = self.activation(x)
             for i in range(1, len(self.fc_layers) - 1):
                 if self.shortcut:
                     x = torch.concat((x, x_clone), axis=-1)
                 x = self.fc_layers[i](x)
                 if self.batch_norm:
                     x = self.bn_layers[i](x)
-                x = self.nonlinear(x)
+                x = self.activation(x)
             if self.shortcut:
                 x = torch.concat((x, x_clone), axis=-1)
             return self.fc_layers[-1](x)
@@ -106,23 +180,85 @@ class MLP(nn.Module):
     __call__ = _forward
 
 
-class QuantileMLP1D(MLP):
+class QuantileNet1D(MLP):
+    """
+    Neural Network to predict the 1-dim quantiles.
 
-    def __init__(self, low, high, quantile_method='cumsum', binary_depth=0, *args, **kwargs):
-        super(QuantileMLP1D, self).__init__(*args, **kwargs)
+    Parameters
+    ----------
+    low : float
+        The lower bound of prior.
+    high : float
+        The upper bound of prior.
+    quantiles : int or array_like of float, optional
+        The quantiles to fit. If ``int``, will divide the interval ``[0, 1]`` into
+        ``quantiles`` bins and therefore fit the evenly spaced ``quantiles - 1`` quantiles
+        between ``0`` (exclusive) and ``1`` (exclusive). Otherwise, should be in ascending
+        order, larger than 0, and smaller than 1. Set to ``12`` by default.
+    quantile_method : str, optional
+        Should be either ``'cumsum'`` or ``'binary'``. Note that ``'binary'`` is not well
+        tested at the moment.
+    binary_depth : int, optional
+        The depth of binary tree. Only used if ``'quantile_method'`` is ``'binary'``.
+    args : array_like, optional
+        Additional arguments to be passed to ``MLP``.
+    kwargs : dict, optional
+        Additional keyword arguments to be passed to ``MLP``.
+
+    Notes
+    -----
+    See ``MLP`` for the additional parameters, some of which are required by the initializer.
+    """
+    def __init__(self, low, high, quantiles=12, quantile_method='cumsum', binary_depth=0,
+                 *args, **kwargs):
+        super(QuantileNet1D, self).__init__(*args, **kwargs)
         self.low = float(low)
         self.high = float(high)
+        if isinstance(quantiles, int):
+            self.quantiles = np.linspace(0, 1, quantiles + 1)[1:-1]
+        else:
+            try:
+                quantiles = np.asarray(quantiles).reshape(-1)
+                assert np.all(quantiles > 0.)
+                assert np.all(quantiles < 1.)
+                assert np.all(np.diff(quantiles) > 0.))
+                self.quantiles = quantiles
+            except Exception:
+                raise ValueError
+        self.quantiles_01 = np.concatenate([[0.], self.quantiles, [1.]])
         self.quantile_method = str(quantile_method)
-        assert self.quantile_method in ('cumsum', 'binary')
+        if self.quantile_method not in ('cumsum', 'binary'):
+            raise ValueError
         self.binary_depth = int(binary_depth)
 
-    def forward(self, x, return_raw=False):
-        x = self._forward(x)
+    def forward(self, x_0=None, x_1=None, return_raw=False):
+        """
+        The forward computation of the model.
+
+        Parameters
+        ----------
+        x_0 : Tensor or None, optional
+            The input variables to be directly passed to the MLP. Set to ``None`` by default.
+        x_1 : Tensor or None, optional
+            The input variables to be first passed to the embedding network. Set to ``None``
+            by default.
+        return_raw : bool, optional
+            If False, only return the quantiles. If True, also return the `raw` output (the
+            intermediate output before the softmax layer) which is typically used for
+            regularization. Set to ``False`` by default.
+
+        Notes
+        -----
+        ``x_0`` and ``x_1`` cannot both be None. ``x_1`` cannot be None if the embedding
+        network is used.
+        """
+        x = self._forward(x_0, x_1)
         if self.quantile_method == 'cumsum':
             y = self.low + (self.high - self.low) * torch.cumsum(torch.softmax(x, axis=-1),
                                                                  axis=-1)[..., :-1]
             return (y, x) if return_raw else y
         elif self.quantile_method == 'binary':
+            # EXPERIMENTAL
             if return_raw:
                 raise NotImplementedError
             x = x.contiguous()
@@ -136,7 +272,8 @@ class QuantileMLP1D(MLP):
                     k0 = j * 2**(self.binary_depth - i)
                     k1 = (j + 1) * 2**(self.binary_depth - i)
                     y[..., k0:k1] *= torch.repeat_interleave(x[:, offset, :],
-                                                             2**(self.binary_depth - i - 1), -1)
+                                                             2**(self.binary_depth - i - 1),
+                                                             -1)
                     offset += 1
             return self.low + (self.high - self.low) * torch.cumsum(y, axis=-1)[..., :-1]
         else:
@@ -144,11 +281,61 @@ class QuantileMLP1D(MLP):
 
     __call__ = forward
 
+    def interp_1d(self, knots):
+        """
+        Utility for the 1-dim quantile interpolation.
+
+        Parameters
+        ----------
+        knots : 1-d array_like of float
+            The predicted quantiles to be interpolated.
+        """
+        knots = np.asarray(knots)
+        assert knots.ndim == 1
+        knots_01 = np.concatenate([[self.low], knots, [self.high]])
+        return Interp1D(knots_01, self.quantiles_01).set_all()
+
+
+class QuantileNet(nn.ModuleList):
+    def __init__(self, modules):
+        if (hasattr(modules, '__iter__') and len(modules) >= 1 and
+            all(isinstance(_, QuantileNet1D) for _ in modules)):
+            super(QuantileNet, self).__init__(modules)
+        else:
+            raise ValueError
+
+    def sample(self, n, x=None, random_seed=None, sobol=True):
+        with torch.no_grad():
+            if x is None:
+                assert self.x_size == 0
+                theta_all = torch.as_tensor(
+                    self.mlp_list[0].sample(n, random_seed), dtype=torch.float)[:, None]
+            else:
+                x = torch.atleast_2d(torch.as_tensor(x, dtype=torch.float))
+                assert tuple(x.shape) == (1, self.x_size)
+                self.mlp_list[0].eval()
+                knots_now = self.mlp_list[0](x).detach().numpy().flatten()
+                theta_all = torch.as_tensor(
+                    self.interp_1d(knots_now, 0).sample(n, random_seed), dtype=torch.float)[:, None]
+            for i in range(1, len(self)):
+                if x is None:
+                    input_now = theta_all
+                else:
+                    input_now = torch.concat(
+                        (torch.tile(x, (theta_all.shape[0], 1)), theta_all), axis=1)
+                self.mlp_list[i].eval()
+                knots_now = self.mlp_list[i](input_now).detach().numpy()
+                theta_now = torch.as_tensor(
+                    np.concatenate([self.interp_1d(k, i).sample(1) for k in knots_now]),
+                    dtype=torch.float)
+                theta_all = torch.concat((theta_all, theta_now[:, None]), axis=1)
+            return theta_all.detach()
+
 
 class NQE:
 
     def __init__(self, quantiles, lows, highs, quantile_method='cumsum', alpha=0.,
-                 add_fc=(256,) * 6, nonlinear='relu', batch_norm=False, shortcut=True,
+                 hidden_neurons=(256,) * 6, activation='relu', batch_norm=False, shortcut=True,
                  input_rescaling=True, loss_rescaling=True, lambda_reg=0., training_batch_size=100,
                  optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None,
                  learning_rate_decay_period=5, learning_rate_decay_gamma=0.9,
@@ -164,7 +351,7 @@ class NQE:
             self.binary_depth = 0
         elif self.quantile_method == 'binary':
             self.binary_depth = np.log2(self.quantiles.size + 1)
-            assert np.isclose(self.binary_depth, int(self.binary_depth), rtol=0., atol=1e-7)
+            assert np.isclose(self.binary_depth, int(self.binary_depth), rtol=0., atol=1e-6)
             self.binary_depth = int(self.binary_depth)
         else:
             raise ValueError
@@ -172,8 +359,8 @@ class NQE:
         self.theta_size = self.lows.size
         self.alpha = float(alpha)
         self.loss = QuantileLoss(self.quantiles, self.alpha)
-        self.add_fc = add_fc
-        self.nonlinear = nonlinear
+        self.hidden_neurons = hidden_neurons
+        self.activation = activation
         self.batch_norm = bool(batch_norm)
         self.shortcut = bool(shortcut)
         self.input_rescaling = bool(input_rescaling)
@@ -197,18 +384,18 @@ class NQE:
         self.mlp_list = []
         self.x_size = 0 if x is None else x.shape[-1]
         if self.quantile_method == 'cumsum':
-            out_features = self.quantiles.size + 1
+            output_neurons = self.quantiles.size + 1
         elif self.quantile_method == 'binary':
-            out_features = 2**(self.binary_depth + 1) - 2
+            output_neurons = 2**(self.binary_depth + 1) - 2
         else:
             raise RuntimeError
         for i in range(self.theta_size):
             if i == 0 and self.x_size == 0:
                 self.mlp_list.append(None)
             else:
-                self.mlp_list.append(QuantileMLP1D(
+                self.mlp_list.append(QuantileNet1D(
                     self.lows[i], self.highs[i], self.quantile_method, self.binary_depth,
-                    self.x_size + i, out_features, self.add_fc, self.nonlinear, self.batch_norm,
+                    self.x_size + i, output_neurons, self.hidden_neurons, self.activation, self.batch_norm,
                     self.shortcut
                 ))
 
@@ -236,7 +423,7 @@ class NQE:
                 self.valid_loss.append(None)
             else:
                 n_epoch, train_loss, valid_loss = self.train_one(i, theta, x, self.mlp_list[i])
-                print(f'Finished training QuantileMLP1D for dim #{i} after {n_epoch} epoches, valid'
+                print(f'Finished training QuantileNet1D for dim #{i} after {n_epoch} epoches, valid'
                       f' loss = {valid_loss[-1][0]:.5f} + {valid_loss[-1][1]:.5f} = '
                       f'{valid_loss[-1][2]:.5f}.')
                 self.train_loss.append(train_loss)
@@ -257,7 +444,7 @@ class NQE:
             raise RuntimeError
         out_tensor = theta[:, i]
         if self.input_rescaling:
-            model.set_whitening(in_tensor)
+            model.set_rescaling(in_tensor)
         if self.loss_rescaling:
             out_std = torch.std(out_tensor).detach()
             out_std = out_std if out_std > 0. else 1.
@@ -349,37 +536,6 @@ class NQE:
             scheduler.step()
             i_epoch += 1
         return i_epoch, np.asarray(loss_train_all), np.asarray(loss_valid_all)
-
-    def interp_1d(self, knots, i):
-        knots_01 = np.concatenate([self.lows[i:(i + 1)], knots, self.highs[i:(i + 1)]])
-        return Interp1D(knots_01, self.quantiles_01).set_all()
-
-    def sample(self, n, x=None, random_seed=None):
-        with torch.no_grad():
-            if x is None:
-                assert self.x_size == 0
-                theta_all = torch.as_tensor(
-                    self.mlp_list[0].sample(n, random_seed), dtype=torch.float)[:, None]
-            else:
-                x = torch.atleast_2d(torch.as_tensor(x, dtype=torch.float))
-                assert tuple(x.shape) == (1, self.x_size)
-                self.mlp_list[0].eval()
-                knots_now = self.mlp_list[0](x).detach().numpy().flatten()
-                theta_all = torch.as_tensor(
-                    self.interp_1d(knots_now, 0).sample(n, random_seed), dtype=torch.float)[:, None]
-            for i in range(1, self.theta_size):
-                if x is None:
-                    input_now = theta_all
-                else:
-                    input_now = torch.concat(
-                        (torch.tile(x, (theta_all.shape[0], 1)), theta_all), axis=1)
-                self.mlp_list[i].eval()
-                knots_now = self.mlp_list[i](input_now).detach().numpy()
-                theta_now = torch.as_tensor(
-                    np.concatenate([self.interp_1d(k, i).sample(1) for k in knots_now]),
-                    dtype=torch.float)
-                theta_all = torch.concat((theta_all, theta_now[:, None]), axis=1)
-            return theta_all.detach()
 
     def check_convergence(self, valid_loss):
         valid_loss = np.asarray(valid_loss)
