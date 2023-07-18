@@ -4,8 +4,25 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from typing import Type, Any, Callable, Union, List, Optional, Tuple
 from .interp import Interp1D
+from copy import deepcopy
+from collections import namedtuple
 
-__all__ = ['QuantileLoss', 'MLP', 'QuantileNet1D', 'NQE']
+__all__ = ['QuantileLoss', 'MLP', 'QuantileNet1D', 'QuantileInterp1D', 'QuantileNet',
+           'get_quantile_net', 'train_1d', 'TrainResult']
+
+
+def _set_quantiles_pred(quantiles_pred):
+    if isinstance(quantiles_pred, int):
+        quantiles_pred = np.linspace(0, 1, quantiles_pred + 1)[1:-1]
+    else:
+        try:
+            quantiles_pred = np.asarray(quantiles_pred, dtype=float).reshape(-1)
+            assert np.all(quantiles_pred > 0.)
+            assert np.all(quantiles_pred < 1.)
+            assert np.all(np.diff(quantiles_pred) > 0.)
+        except Exception:
+            raise ValueError
+    return quantiles_pred
 
 
 class QuantileLoss:
@@ -14,16 +31,19 @@ class QuantileLoss:
 
     Parameters
     ----------
-    quantiles : 1-d array_like
+    quantiles_pred : 1-d array_like
         The quantiles you want to predict, should be larger than 0 and smaller than 1.
     alpha : float, optional
         Each term in the loss will be weighted by ``exp(alpha * abs(quantile - 0.5))``. Set to
         ``0.`` by default.
+    device : str, optional
+        The device on which you train the model. Set to ``'cpu'`` by default.
     """
-    def __init__(self, quantiles, alpha=0.):
-        self.quantiles = torch.as_tensor(quantiles, dtype=torch.float)
+    def __init__(self, quantiles_pred, alpha=0., device='cpu'):
+        self.quantiles_pred = torch.as_tensor(quantiles_pred, dtype=torch.float).to(device)
         self.alpha = float(alpha)
-        self._weights = torch.exp(self.alpha * np.abs(self.quantiles - 0.5))[None]
+        self._weights = (
+            torch.exp(self.alpha * torch.abs(self.quantiles_pred - 0.5))[None]).to(device)
 
     def __call__(self, input, target):
         # in_now shape: # of points, (# of data dims + # of previous theta dims)
@@ -35,7 +55,7 @@ class QuantileLoss:
             target = target[..., None]
         else:
             raise RuntimeError
-        weights = torch.where(target > input, self.quantiles, 1 - self.quantiles)
+        weights = torch.where(target > input, self.quantiles_pred, 1. - self.quantiles_pred)
         return torch.mean(torch.abs(weights * self._weights * (input - target)))
 
 
@@ -46,9 +66,9 @@ class MLP(nn.Module):
     Parameters
     ----------
     input_neurons : int
-        The number of input neurons. When ``embedding_net`` is not ``None``, this should match
-        the `output` dimension of ``embedding_net`` plus the dimension of any additional
-        predictor variables.
+        The number of input neurons, which should match the dimension of data `plus` any additional
+        predictor variables. When ``embedding_net`` is not ``None``, this should match the `output`
+        dimension of ``embedding_net`` plus the dimension of any additional predictor variables.
     output_neurons : int
         The number of output neurons.
     hidden_neurons : None, int, 1-d array_like of int
@@ -61,11 +81,12 @@ class MLP(nn.Module):
         Whether to add batch normalization before each non-linear activation function. Set to
         ``False`` by default.
     shortcut : bool, optional
-        Whether to add shortcut connections, i.e. the input layer will be concatenated with
-        each hidden layer. Set to ``True`` by default.
+        Whether to add shortcut connections, i.e. the input layer will be concatenated with each
+        hidden layer. Set to ``True`` by default.
     embedding_net : None or nn.Module, optional
-        Additional embedding network before the MLP layers. Set to ``None`` by default. The
-        output should be a flattened 1-dim tensor.
+        Additional embedding network before the MLP layers. Set to ``None`` by default, which is
+        interpreted as ``F(x, theta) = x``. The input should be the data x and the variables theta;
+        the output should be a flattened 1-dim tensor.
     """
     def __init__(self, input_neurons, output_neurons, hidden_neurons, activation='relu',
                  batch_norm=False, shortcut=True, embedding_net=None):
@@ -76,8 +97,12 @@ class MLP(nn.Module):
             self.embedding_net = embedding_net
         else:
             raise ValueError
-        self.mu = 0.
-        self.sigma = 1.
+        self.train_loss = []
+        self.valid_loss = []
+        self.mu_x = 0.
+        self.sigma_x = 1.
+        self.mu_theta = 0.
+        self.sigma_theta = 1.
 
     def _make_fc(self, input_neurons, output_neurons, hidden_neurons, activation, batch_norm,
                  shortcut):
@@ -118,38 +143,56 @@ class MLP(nn.Module):
                 # pass thru activation, concat with shortcut
             self.fc_layers.append(nn.Linear(hidden_neurons[-2] + k, hidden_neurons[-1]))
 
-    def set_rescaling(self, x_0):
+    def set_rescaling(self, x=None, mu_x=None, sigma_x=None, theta=None, mu_theta=None,
+                      sigma_theta=None):
         """
-        Set the optional rescaling for x_0.
+        Set the optional rescaling.
         """
-        self.mu = torch.mean(x_0, axis=0).detach()
-        self.sigma = torch.std(x_0, axis=0)
-        self.sigma = torch.where(self.sigma > 0., self.sigma, 1e-10).detach()
+        if x is not None:
+            self.mu_x = torch.mean(x, dim=0).detach()
+            self.sigma_x = torch.std(x, dim=0)
+            self.sigma_x = torch.where(self.sigma_x > 0., self.sigma_x, 1e-8).detach()
+        if mu_x is not None:
+            self.mu_x = torch.as_tensor(mu_x)
+        if sigma_x is not None:
+            self.sigma_x = torch.as_tensor(sigma_x)
+        if theta is not None:
+            self.mu_theta = torch.mean(theta, dim=0).detach()
+            self.sigma_theta = torch.std(theta, dim=0)
+            self.sigma_theta = torch.where(self.sigma_theta > 0., self.sigma_theta, 1e-8).detach()
+        if mu_theta is not None:
+            self.mu_theta = torch.as_tensor(mu_theta)
+        if sigma_theta is not None:
+            self.sigma_theta = torch.as_tensor(sigma_theta)
 
-    def _forward(self, x_0=None, x_1=None):
+    def _forward(self, x=None, theta=None):
         """
-        The forward computation of the model.
+        The forward evaluation of the model.
 
         Parameters
         ----------
-        x_0 : Tensor or None, optional
-            The input variables to be directly passed to the MLP. Set to ``None`` by default.
-        x_1 : Tensor or None, optional
-            The input variables to be first passed to the embedding network. Set to ``None``
-            by default.
+        x : Tensor or None, optional
+            The input variables to be first passed to the embedding network. Set to ``None`` by
+            default.
+        theta : Tensor or None, optional
+            The input variables to be first passed to the embedding network as well as directly
+            passed to the MLP. Set to ``None`` by default.
 
         Notes
         -----
-        ``x_0`` and ``x_1`` cannot both be None.
+        ``x`` and ``theta`` cannot both be None.
         """
-        if x_0 is not None and x_1 is not None:
-            x_0 = (x_0 - self.mu) / self.sigma
-            x_1 = self.embedding_net(x_1) if self.embedding_net is not None else x_1
-            x = torch.concat((x_0, x_1), dim=-1)
-        elif x_0 is not None and x_1 is None:
-            x = (x_0 - self.mu) / self.sigma
-        elif x_0 is None and x_1 is not None:
-            x = self.embedding_net(x_1) if self.embedding_net is not None else x_1
+        if x is not None and theta is not None:
+            x = (x - self.mu_x) / self.sigma_x
+            theta = (theta - self.mu_theta) / self.sigma_theta
+            x = self.embedding_net(x, theta) if self.embedding_net is not None else x
+            x = torch.concat((x, theta), dim=-1)
+        elif x is not None and theta is None:
+            x = (x - self.mu_x) / self.sigma_x
+            x = self.embedding_net(x, theta) if self.embedding_net is not None else x
+        elif x is None and theta is not None:
+            theta = (theta - self.mu_theta) / self.sigma_theta
+            x = theta
         else:
             raise ValueError
 
@@ -186,62 +229,60 @@ class QuantileNet1D(MLP):
 
     Parameters
     ----------
+    i : int
+        The index of theta predicted by this network.
     low : float
         The lower bound of prior.
     high : float
         The upper bound of prior.
-    quantiles : int or array_like of float, optional
+    quantiles_pred : int or array_like of float, optional
         The quantiles to fit. If ``int``, will divide the interval ``[0, 1]`` into
-        ``quantiles`` bins and therefore fit the evenly spaced ``quantiles - 1`` quantiles
-        between ``0`` (exclusive) and ``1`` (exclusive). Otherwise, should be in ascending
-        order, larger than 0, and smaller than 1. Set to ``12`` by default.
+        ``quantiles_pred`` bins and therefore fit the evenly spaced ``quantiles_pred - 1`` quantiles
+        between ``0`` (exclusive) and ``1`` (exclusive). Otherwise, should be in ascending order,
+        larger than 0, and smaller than 1. Set to ``12`` by default.
     quantile_method : str, optional
-        Should be either ``'cumsum'`` or ``'binary'``. Note that ``'binary'`` is not well
-        tested at the moment.
+        Should be either ``'cumsum'`` or ``'binary'``. Note that ``'binary'`` is not well tested at
+        the moment.
     binary_depth : int, optional
         The depth of binary tree. Only used if ``'quantile_method'`` is ``'binary'``.
-    args : array_like, optional
-        Additional arguments to be passed to ``MLP``.
+    split_threshold : float, optional
+        The threshold for splitting into two peaks to account for multimodality during the
+        interpolation. Set to ``1e-2`` by default.
     kwargs : dict, optional
-        Additional keyword arguments to be passed to ``MLP``.
+        Additional keyword arguments to be passed to ``MLP``. Note that the ``output_neurons``
+        parameter will be automatically set according to ``quantiles_pred``.
 
     Notes
     -----
     See ``MLP`` for the additional parameters, some of which are required by the initializer.
     """
-    def __init__(self, low, high, quantiles=12, quantile_method='cumsum', binary_depth=0,
-                 *args, **kwargs):
-        super(QuantileNet1D, self).__init__(*args, **kwargs)
+    def __init__(self, i, low, high, quantiles_pred=12, quantile_method='cumsum', binary_depth=0,
+                 split_threshold=1e-2, **kwargs):
+        self.quantiles_pred = _set_quantiles_pred(quantiles_pred)
+        kwargs['output_neurons'] = self.quantiles_pred.size + 1
+        super(QuantileNet1D, self).__init__(**kwargs)
+        self.i = int(i)
         self.low = float(low)
         self.high = float(high)
-        if isinstance(quantiles, int):
-            self.quantiles = np.linspace(0, 1, quantiles + 1)[1:-1]
-        else:
-            try:
-                quantiles = np.asarray(quantiles).reshape(-1)
-                assert np.all(quantiles > 0.)
-                assert np.all(quantiles < 1.)
-                assert np.all(np.diff(quantiles) > 0.))
-                self.quantiles = quantiles
-            except Exception:
-                raise ValueError
-        self.quantiles_01 = np.concatenate([[0.], self.quantiles, [1.]])
+        self.quantiles = np.concatenate([[0.], self.quantiles_pred, [1.]])
         self.quantile_method = str(quantile_method)
         if self.quantile_method not in ('cumsum', 'binary'):
             raise ValueError
         self.binary_depth = int(binary_depth)
+        self.split_threshold = float(split_threshold)
 
-    def forward(self, x_0=None, x_1=None, return_raw=False):
+    def forward(self, x=None, theta=None, return_raw=False):
         """
-        The forward computation of the model.
+        The forward evaluation of the model.
 
         Parameters
         ----------
-        x_0 : Tensor or None, optional
-            The input variables to be directly passed to the MLP. Set to ``None`` by default.
-        x_1 : Tensor or None, optional
-            The input variables to be first passed to the embedding network. Set to ``None``
-            by default.
+        x : Tensor or None, optional
+            The input variables to be first passed to the embedding network. Set to ``None`` by
+            default.
+        theta : Tensor or None, optional
+            The input variables to be first passed to the embedding network as well as directly
+            passed to the MLP. Set to ``None`` by default.
         return_raw : bool, optional
             If False, only return the quantiles. If True, also return the `raw` output (the
             intermediate output before the softmax layer) which is typically used for
@@ -249,10 +290,10 @@ class QuantileNet1D(MLP):
 
         Notes
         -----
-        ``x_0`` and ``x_1`` cannot both be None. ``x_1`` cannot be None if the embedding
-        network is used.
+        ``x`` and ``theta`` cannot both be None, and should be consistent with the embedding
+        network architecture.
         """
-        x = self._forward(x_0, x_1)
+        x = self._forward(x, theta)
         if self.quantile_method == 'cumsum':
             y = self.low + (self.high - self.low) * torch.cumsum(torch.softmax(x, axis=-1),
                                                                  axis=-1)[..., :-1]
@@ -275,275 +316,348 @@ class QuantileNet1D(MLP):
                                                              2**(self.binary_depth - i - 1),
                                                              -1)
                     offset += 1
-            return self.low + (self.high - self.low) * torch.cumsum(y, axis=-1)[..., :-1]
+            y = self.low + (self.high - self.low) * torch.cumsum(y, axis=-1)[..., :-1]
+            return (y, x) if return_raw else y
         else:
             return ValueError
 
     __call__ = forward
 
-    def interp_1d(self, knots):
+    def interp_1d(self, knots_pred):
         """
         Utility for the 1-dim quantile interpolation.
 
         Parameters
         ----------
-        knots : 1-d array_like of float
-            The predicted quantiles to be interpolated.
+        knots_pred : 1-d array_like of float
+            The locations of predicted quantiles to be interpolated.
         """
-        knots = np.asarray(knots)
-        assert knots.ndim == 1
-        knots_01 = np.concatenate([[self.low], knots, [self.high]])
-        return Interp1D(knots_01, self.quantiles_01).set_all()
+        knots_pred = np.asarray(knots_pred)
+        assert knots_pred.ndim == 1
+        knots = np.concatenate([[self.low], knots_pred, [self.high]])
+        return Interp1D(knots, self.quantiles, self.split_threshold).set_all()
+
+    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, device='cpu'):
+        with torch.no_grad():
+            self.to(device)
+            self.eval()
+            assert x is not None
+            x = torch.as_tensor(x, dtype=torch.float)[None].to(device)
+            if theta is None:
+                knots_pred = self(x, theta).detach().cpu().numpy()[0]
+                return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed, sobol=sobol)
+            else:
+                theta = torch.atleast_2d(torch.as_tensor(theta, dtype=torch.float)).to(device)
+                assert theta.ndim == 2
+                assert theta.shape[0] == n
+                x = torch.tile(x, [n] + list(np.ones(x.ndim - 1, dtype=int)))
+                knots_pred = self(x, theta).detach().cpu().numpy()
+                return np.concatenate([
+                    self.interp_1d(k).sample(n=1, random_seed=random_seed, sobol=sobol) for k in
+                    knots_pred])
+
+
+class QuantileInterp1D(Interp1D):
+    """
+    Convenience class for the first dimension of theta when x is None.
+
+    No NNs are used since the quantiles can be directly estimated from the emperical values.
+
+    Parameters
+    ----------
+    theta : 1_d array_like of float
+        The first dimension of theta.
+    low : float
+        The lower bound of prior.
+    high : float
+        The upper bound of prior.
+    quantiles_pred : int or array_like of float, optional
+        The quantiles to fit. If ``int``, will divide the interval ``[0, 1]`` into
+        ``quantiles_pred`` bins and therefore fit the evenly spaced ``quantiles_pred - 1`` quantiles
+        between ``0`` (exclusive) and ``1`` (exclusive). Otherwise, should be in ascending order,
+        larger than 0, and smaller than 1. Set to ``12`` by default.
+    split_threshold : float, optional
+        The threshold for splitting into two peaks to account for multimodality during the
+        interpolation. Set to ``1e-2`` by default.
+    """
+    def __init__(self, theta, low, high, quantiles_pred=12, split_threshold=1e-2):
+        if isinstance(theta, torch.Tensor):
+            theta = theta.detach().cpu().numpy()
+        self.i = 0
+        quantiles_pred = _set_quantiles_pred(quantiles_pred)
+        knots_pred = np.quantile(theta, quantiles_pred)
+        super(QuantileInterp1D, self).__init__(np.concatenate([[low], knots_pred, [high]]),
+                                               np.concatenate([[0.], self.quantiles_pred, [1.]]),
+                                               split_threshold)
 
 
 class QuantileNet(nn.ModuleList):
+    """
+    List of individual 1-dim conditional quantile networks.
+    """
     def __init__(self, modules):
         if (hasattr(modules, '__iter__') and len(modules) >= 1 and
-            all(isinstance(_, QuantileNet1D) for _ in modules)):
+            all(isinstance(_, (QuantileNet1D, QuantileInterp1D)) or _ is None for _ in modules)):
             super(QuantileNet, self).__init__(modules)
         else:
             raise ValueError
 
-    def sample(self, n, x=None, random_seed=None, sobol=True):
+    def check(self):
+        for i in range(len(self)):
+            if not (self[i].i == i and isinstance(self[i], (QuantileNet1D, QuantileInterp1D))):
+                return False
+        return True
+
+    def sample(self, n=1, x=None, random_seed=None, sobol=True, device='cpu'):
+        random_seed = np.random.default_rng(random_seed)
+        if not self.check():
+            raise RuntimeError('This QuantileNet is not well defined.')
         with torch.no_grad():
-            if x is None:
-                assert self.x_size == 0
-                theta_all = torch.as_tensor(
-                    self.mlp_list[0].sample(n, random_seed), dtype=torch.float)[:, None]
-            else:
-                x = torch.atleast_2d(torch.as_tensor(x, dtype=torch.float))
-                assert tuple(x.shape) == (1, self.x_size)
-                self.mlp_list[0].eval()
-                knots_now = self.mlp_list[0](x).detach().numpy().flatten()
-                theta_all = torch.as_tensor(
-                    self.interp_1d(knots_now, 0).sample(n, random_seed), dtype=torch.float)[:, None]
+            theta_all = self[0].sample(n=n, x=x, random_seed=random_seed, sobol=sobol,
+                                       device=device)[:, None]
             for i in range(1, len(self)):
-                if x is None:
-                    input_now = theta_all
-                else:
-                    input_now = torch.concat(
-                        (torch.tile(x, (theta_all.shape[0], 1)), theta_all), axis=1)
-                self.mlp_list[i].eval()
-                knots_now = self.mlp_list[i](input_now).detach().numpy()
-                theta_now = torch.as_tensor(
-                    np.concatenate([self.interp_1d(k, i).sample(1) for k in knots_now]),
-                    dtype=torch.float)
-                theta_all = torch.concat((theta_all, theta_now[:, None]), axis=1)
-            return theta_all.detach()
+                theta_now = self[i].sample(n=n, x=x, theta=theta_all, random_seed=random_seed,
+                                           sobol=sobol, device=device)[: None]
+                theta_all = np.concatenate((theta_all, theta_now[:, None]), axis=1)
+            return theta_all
 
 
-class NQE:
-
-    def __init__(self, quantiles, lows, highs, quantile_method='cumsum', alpha=0.,
-                 hidden_neurons=(256,) * 6, activation='relu', batch_norm=False, shortcut=True,
-                 input_rescaling=True, loss_rescaling=True, lambda_reg=0., training_batch_size=100,
-                 optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None,
-                 learning_rate_decay_period=5, learning_rate_decay_gamma=0.9,
-                 validation_fraction=0.15, stop_after_epochs=20, max_epoches=np.inf):
-        self.quantiles = np.asarray(quantiles)
-        self.lows = np.atleast_1d(lows)
-        self.highs = np.atleast_1d(highs)
-        assert self.quantiles.ndim == 1 and np.all(np.diff(quantiles) > 0.)
-        assert np.all(self.quantiles > 0.) and np.all(self.quantiles < 1.)
-        assert self.lows.ndim == 1 and self.lows.shape == self.highs.shape
-        self.quantile_method = str(quantile_method)
-        if self.quantile_method == 'cumsum':
-            self.binary_depth = 0
-        elif self.quantile_method == 'binary':
-            self.binary_depth = np.log2(self.quantiles.size + 1)
-            assert np.isclose(self.binary_depth, int(self.binary_depth), rtol=0., atol=1e-6)
-            self.binary_depth = int(self.binary_depth)
+def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_end=None,
+                     quantiles_pred=12, split_threshold=1e-2, activation='relu', batch_norm=False,
+                     shortcut=True, embedding_net=None):
+    low = np.asarray(low)
+    high = np.asarray(high)
+    if not (low.shape == high.shape and low.ndim == 1):
+        raise ValueError
+    module_list = []
+    for i in range(low.size):
+        if (i_start is None or i >= i_start) and (i_end is None or i < i_end):
+            module_list.append(QuantileNet1D(
+                i=i, low=low[i], high=high[i], quantiles_pred=quantiles_pred,
+                split_threshold=split_threshold, input_neurons=input_neurons + i,
+                hidden_neurons=hidden_neurons, activation=activation, batch_norm=batch_norm,
+                shortcut=shortcut, embedding_net=embedding_net
+            ))
         else:
+            module_list.append(None)
+    return QuantileNet(module_list)
+
+
+def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
+             validation_fraction=0.15, train_loader=None, valid_loader=None, alpha=0.,
+             rescale_data=False, target_loss_ratio=0., beta_reg=0.5, optimizer='Adam',
+             learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
+             learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
+             stop_after_epochs=20, max_epochs=300, return_best_epoch=True):
+    quantile_net_1d.to(device)
+    if optimizer_kwargs is None:
+        optimizer_kwargs = {}
+    if scheduler_kwargs is None:
+        scheduler_kwargs = {}
+    if theta is not None:
+        theta = torch.as_tensor(theta)
+        if not theta.ndim == 2:
             raise ValueError
-        self.quantiles_01 = np.concatenate([[0.], self.quantiles, [1.]])
-        self.theta_size = self.lows.size
-        self.alpha = float(alpha)
-        self.loss = QuantileLoss(self.quantiles, self.alpha)
-        self.hidden_neurons = hidden_neurons
-        self.activation = activation
-        self.batch_norm = bool(batch_norm)
-        self.shortcut = bool(shortcut)
-        self.input_rescaling = bool(input_rescaling)
-        self.loss_rescaling = bool(loss_rescaling)
-        self.lambda_reg = np.asarray(lambda_reg)
-        self.training_batch_size = training_batch_size
-        self.optimizer = optimizer
-        self.learning_rate = learning_rate
-        if optimizer_kwargs is not None:
-            self.optimizer_kwargs = optimizer_kwargs
-        else:
-            self.optimizer_kwargs = {}
-        self.learning_rate_decay_period = learning_rate_decay_period
-        self.learning_rate_decay_gamma = learning_rate_decay_gamma
-        self.validation_fraction = validation_fraction
-        self.stop_after_epochs = stop_after_epochs
-        self.max_epoches = max_epoches
-        self.mlp_list = []
-
-    def set_dim(self, x):
-        self.mlp_list = []
-        self.x_size = 0 if x is None else x.shape[-1]
-        if self.quantile_method == 'cumsum':
-            output_neurons = self.quantiles.size + 1
-        elif self.quantile_method == 'binary':
-            output_neurons = 2**(self.binary_depth + 1) - 2
-        else:
-            raise RuntimeError
-        for i in range(self.theta_size):
-            if i == 0 and self.x_size == 0:
-                self.mlp_list.append(None)
-            else:
-                self.mlp_list.append(QuantileNet1D(
-                    self.lows[i], self.highs[i], self.quantile_method, self.binary_depth,
-                    self.x_size + i, output_neurons, self.hidden_neurons, self.activation, self.batch_norm,
-                    self.shortcut
-                ))
-
-    def __call__(self, *args, **kwargs):
-        return self.sample(*args, **kwargs)
-
-    def train(self, theta, x=None):
-        theta = torch.as_tensor(theta, dtype=torch.float)
-        if theta.ndim == 1:
-            theta = theta[:, None]
-        assert theta.ndim == 2 and theta.shape[-1] == self.theta_size
-        if x is not None:
-            x = torch.as_tensor(x, dtype=torch.float)
-            assert x.ndim == 2
-            assert theta.shape[0] == x.shape[0]
-        self.set_dim(x)
-        self.train_loss = []
-        self.valid_loss = []
-        for i in range(self.theta_size):
-            if i == 0 and x is None:
-                knots = np.quantile(theta[:, 0].detach().numpy(), self.quantiles)
-                self.mlp_list[0] = self.interp_1d(knots, 0)
-                self.mlp_list[0].set_all()
-                self.train_loss.append(None)
-                self.valid_loss.append(None)
-            else:
-                n_epoch, train_loss, valid_loss = self.train_one(i, theta, x, self.mlp_list[i])
-                print(f'Finished training QuantileNet1D for dim #{i} after {n_epoch} epoches, valid'
-                      f' loss = {valid_loss[-1][0]:.5f} + {valid_loss[-1][1]:.5f} = '
-                      f'{valid_loss[-1][2]:.5f}.')
-                self.train_loss.append(train_loss)
-                self.valid_loss.append(valid_loss)
-        return self.train_loss, self.valid_loss
-
-    def train_one(self, i, theta, x, model):
         n_all = theta.shape[0]
-        n_train = int((1 - self.validation_fraction) * n_all)
+        n_train = int((1 - validation_fraction) * n_all)
         n_valid = n_all - n_train
-        if i > 0 and x is not None:
-            in_tensor = torch.concat((x, theta[:, :i]), axis=1)
-        elif i > 0 and x is None:
-            in_tensor = theta[:, :i]
-        elif i == 0 and x is not None:
-            in_tensor = x
-        else:
-            raise RuntimeError
-        out_tensor = theta[:, i]
-        if self.input_rescaling:
-            model.set_rescaling(in_tensor)
-        if self.loss_rescaling:
-            out_std = torch.std(out_tensor).detach()
-            out_std = out_std if out_std > 0. else 1.
-        else:
-            out_std = 1.
 
-        class TrainData(Dataset):
-            def __len__(self):
-                return n_train
-            def __getitem__(self, i):
-                return in_tensor[i], out_tensor[i]
-
-        class ValidData(Dataset):
-            def __len__(self):
-                return n_valid
-            def __getitem__(self, i):
-                return in_tensor[n_train + i], out_tensor[n_train + i]
+        if x is None:
+            class TrainData(Dataset):
+                def __len__(self):
+                    return n_train
+                def __getitem__(self, i):
+                    return theta[i]
+            class ValidData(Dataset):
+                def __len__(self):
+                    return n_valid
+                def __getitem__(self, i):
+                    return theta[n_train + i]
+        else:
+            x = torch.as_tensor(x)
+            if not theta.shape[0] == x.shape[0]:
+                raise ValueError
+            class TrainData(Dataset):
+                def __len__(self):
+                    return n_train
+                def __getitem__(self, i):
+                    return x[i], theta[i]
+            class ValidData(Dataset):
+                def __len__(self):
+                    return n_valid
+                def __getitem__(self, i):
+                    return x[n_train + i], theta[n_train + i]
 
         train_data = TrainData()
         valid_data = ValidData()
-        train_loader = DataLoader(dataset=train_data, batch_size=self.training_batch_size,
-                                  pin_memory=True, shuffle=True, drop_last=True)
-        valid_loader = DataLoader(dataset=valid_data, batch_size=self.training_batch_size,
-                                  pin_memory=True, shuffle=False, drop_last=False)
-        optimizer = eval('torch.optim.' + self.optimizer)
-        optimizer = optimizer(model.parameters(), lr=self.learning_rate, **self.optimizer_kwargs)
-        scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer, step_size=self.learning_rate_decay_period,
-            gamma=self.learning_rate_decay_gamma, verbose=False
-        )
-        loss_train_all = []
-        loss_valid_all = []
-        i_epoch = 0
+        train_loader = DataLoader(dataset=train_data, batch_size=batch_size, shuffle=True,
+                                  drop_last=True)
+        valid_loader = DataLoader(dataset=valid_data, batch_size=batch_size, shuffle=False,
+                                  drop_last=False)
 
-        while not self.check_convergence(loss_valid_all):
-            model.train()
-            loss_train_0 = 0.
-            loss_train_1 = 0.
-            loss_train = 0.
-            for j, (in_now, out_now) in enumerate(train_loader):
-                # x_now = x_now.to(device)
-                # theta_now = theta_now.to(device)
-                # print(in_now.dtype)
-                y = model(in_now, return_raw=True)
-                loss_0 = self.loss(y[0], out_now) / out_std
-                if self.lambda_reg.size == 1:
-                    lambda_now = float(self.lambda_reg)
+    else:
+        if not (isinstance(train_loader, DataLoader) and isinstance(valid_loader, DataLoader)):
+            raise ValueError
+
+    if rescale_data:
+        mu_x = []
+        sigma_x = []
+        mu_theta = []
+        sigma_theta = []
+
+        for batch_now in train_loader:
+            x_now, theta_now = _decode_batch(batch_now, device)
+            if x_now is not None:
+                mu_x.append(torch.mean(x_now, dim=0))
+                sigma_x.append(torch.std(x_now, dim=0))
+            if quantile_net_1d.i > 0:
+                mu_theta.append(torch.mean(theta_now[..., :quantile_net_1d.i], dim=0))
+                sigma_theta.append(torch.std(theta_now[..., :quantile_net_1d.i], dim=0))
+
+        mu_x = torch.mean(torch.concat(mu_x), dim=0) if len(mu_x) > 0 else None
+        sigma_x = torch.mean(torch.concat(sigma_x), dim=0) if len(sigma_x) > 0 else None
+        mu_theta = torch.mean(torch.concat(mu_theta), dim=0) if len(mu_theta) > 0 else None
+        sigma_theta = torch.mean(torch.concat(sigma_theta), dim=0) if len(sigma_theta) > 0 else None
+        quantile_net_1d.set_rescaling(mu_x=mu_x, sigma_x=sigma_x, mu_theta=mu_theta,
+                                      sigma_theta=sigma_theta)
+
+    loss = QuantileLoss(quantile_net_1d.quantiles_pred, alpha, device=device)
+
+    if isinstance(optimizer, type) and issubclass(optimizer, torch.optim.Optimizer):
+        optimizer = optimizer(quantile_net_1d.parameters(), **optimizer_kwargs)
+    elif isinstance(optimizer, torch.optim.Optimizer):
+        pass
+    elif isinstance(optimizer, str):
+        optimizer = eval('torch.optim.' + optimizer)
+        optimizer = optimizer(quantile_net_1d.parameters(), lr=learning_rate, **optimizer_kwargs)
+    else:
+        raise ValueError
+
+    if isinstance(scheduler, type) and issubclass(scheduler, torch.optim.lr_scheduler.LRScheduler):
+        scheduler = scheduler(optimizer, **scheduler_kwargs)
+    elif isinstance(scheduler, torch.optim.lr_scheduler.LRScheduler):
+        pass
+    elif scheduler == 'StepLR':
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=learning_rate_decay_period,
+                                                    gamma=learning_rate_decay_gamma, verbose=False)
+    elif isinstance(scheduler, str):
+        scheduler = eval('torch.optim.lr_scheduler.' + optimizer)
+        scheduler = scheduler(optimizer, **scheduler_kwargs)
+    else:
+        raise ValueError
+
+    l0_train_all = []
+    l1_train_all = []
+    l0_valid_all = []
+    l1_valid_all = []
+    lambda_reg_all = []
+    i_epoch = -1
+    lambda_reg = 0.
+    state_dict_cache = []
+
+    while not _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_all, stop_after_epochs,
+                                 max_epochs):
+        i_epoch += 1
+        lambda_reg_all.append(lambda_reg)
+        quantile_net_1d.train()
+        l0_train = 0.
+        l1_train = 0.
+        for j, batch_now in enumerate(train_loader):
+            x_now, theta_now = _decode_batch(batch_now, device)
+            if quantile_net_1d.i > 0:
+                y_now = quantile_net_1d(x_now, theta_now[..., :quantile_net_1d.i], return_raw=True)
+            else:
+                y_now = quantile_net_1d(x_now, None, return_raw=True)
+            l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
+            if target_loss_ratio > 0.:
+                l1_now = torch.mean(y_now[1][..., 1:-1]**2)
+            else:
+                l1_now = torch.tensor(0.)
+            loss_now = l0_now + lambda_reg * l1_now
+            optimizer.zero_grad()
+            loss_now.backward()
+            optimizer.step()
+            l0_train += l0_now.detach().cpu().numpy() # * theta_now.shape[0]
+            l1_train += l1_now.detach().cpu().numpy() # * theta_now.shape[0]
+        l0_train /= (j + 1)
+        l1_train /= (j + 1)
+        assert np.isfinite(l0_train) and np.isfinite(l1_train)
+        l0_train_all.append(l0_train)
+        l1_train_all.append(l1_train)
+
+        quantile_net_1d.eval()
+        l0_valid = 0.
+        l1_valid = 0.
+        with torch.no_grad():
+            for j, batch_now in enumerate(valid_loader):
+                x_now, theta_now = _decode_batch(batch_now, device)
+                if quantile_net_1d.i > 0:
+                    y_now = quantile_net_1d(x_now, theta_now[..., :quantile_net_1d.i],
+                                            return_raw=True)
                 else:
-                    lambda_now = float(self.lambda_reg[i])
-                loss_1 = lambda_now * torch.mean(y[1]**2) if lambda_now > 0. else torch.tensor(0.)
-                loss_now = loss_0 + loss_1
-                optimizer.zero_grad()
-                loss_now.backward()
-                optimizer.step()
-                loss_train_0 += loss_0.detach().numpy() * in_now.shape[0]
-                loss_train_1 += loss_1.detach().numpy() * in_now.shape[0]
-                loss_train += loss_now.detach().numpy() * in_now.shape[0]
-            loss_train_0 /= len(train_data)
-            loss_train_1 /= len(train_data)
-            loss_train /= len(train_data)
-            assert np.isfinite(loss_train)
-            loss_train_all.append([loss_train_0, loss_train_1, loss_train])
+                    y_now = quantile_net_1d(x_now, None, return_raw=True)
+                l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
+                if target_loss_ratio > 0.:
+                    l1_now = torch.mean(y_now[1][..., 1:-1]**2)
+                else:
+                    l1_now = torch.tensor(0.)
+                loss_now = l0_now + lambda_reg * l1_now
+                l0_valid += l0_now.detach().cpu().numpy() * theta_now.shape[0]
+                l1_valid += l1_now.detach().cpu().numpy() * theta_now.shape[0]
+            l0_valid /= len(valid_loader.dataset)
+            l1_valid /= len(valid_loader.dataset)
+            assert np.isfinite(l0_valid) and np.isfinite(l1_valid)
+            l0_valid_all.append(l0_valid)
+            l1_valid_all.append(l1_valid)
 
-            model.eval()
-            loss_valid_0 = 0.
-            loss_valid_1 = 0.
-            loss_valid = 0.
-            with torch.no_grad():
-                for j, (in_now, out_now) in enumerate(valid_loader):
-                    # x_now = x_now.to(device)
-                    # theta_now = theta_now.to(device)
-                    y = model(in_now, return_raw=True)
-                    loss_0 = self.loss(y[0], out_now) / out_std
-                    if self.lambda_reg.size == 1:
-                        lambda_now = float(self.lambda_reg)
-                    else:
-                        lambda_now = float(self.lambda_reg[i])
-                    loss_1 = lambda_now * torch.mean(y[1]**2) if lambda_now > 0. else torch.tensor(0.)
-                    loss_now = loss_0 + loss_1
-                    loss_valid_0 += loss_0.detach().numpy() * in_now.shape[0]
-                    loss_valid_1 += loss_1.detach().numpy() * in_now.shape[0]
-                    loss_valid += loss_now.detach().numpy() * in_now.shape[0]
-                loss_valid_0 /= len(valid_data)
-                loss_valid_1 /= len(valid_data)
-                loss_valid /= len(valid_data)
-                assert np.isfinite(loss_valid)
-                loss_valid_all.append([loss_valid_0, loss_valid_1, loss_valid])
+        if target_loss_ratio > 0.:
+            lambda_reg = ((1. - beta_reg) * lambda_reg +
+                          beta_reg * target_loss_ratio * l0_train / l1_train)
+        if return_best_epoch:
+            state_dict_cache.append(deepcopy(quantile_net_1d.state_dict()))
+            if len(state_dict_cache) > stop_after_epochs + 1:
+                state_dict_cache = state_dict_cache[-(stop_after_epochs + 1):]
+        scheduler.step()
 
-            scheduler.step()
-            i_epoch += 1
-        return i_epoch, np.asarray(loss_train_all), np.asarray(loss_valid_all)
+    if return_best_epoch and i_epoch + 1 < max_epochs:
+        state_dict = state_dict_cache[0]
+        quantile_net_1d.load_state_dict(state_dict)
+        i_epoch -= stop_after_epochs
+    else:
+        state_dict = deepcopy(quantile_net_1d.state_dict())
+    # state_dict={k: v.cpu() for k, v in state_dict.items()}
 
-    def check_convergence(self, valid_loss):
-        valid_loss = np.asarray(valid_loss)
-        if (len(valid_loss) > self.stop_after_epochs and
-            np.nanmin(valid_loss[:-self.stop_after_epochs, 2]) <=
-            np.nanmin(valid_loss[-self.stop_after_epochs:, 2])):
-            return True
-        elif valid_loss.shape[0] >= self.max_epoches:
+    return quantile_net_1d, TrainResult(state_dict=state_dict,
+                                        l0_train=np.asarray(l0_train_all),
+                                        l1_train=np.asarray(l1_train_all),
+                                        l0_valid=np.asarray(l0_valid_all),
+                                        l1_valid=np.asarray(l1_valid_all),
+                                        lambda_reg=np.asarray(lambda_reg_all),
+                                        i_epoch=i_epoch)
+
+
+TrainResult = namedtuple('TrainResult', ['state_dict', 'l0_train', 'l1_train', 'l0_valid',
+                                         'l1_valid', 'lambda_reg', 'i_epoch'])
+
+
+def _decode_batch(batch_now, device):
+    if isinstance(batch_now, torch.Tensor):
+        return None, batch.to(device)
+    elif hasattr(batch_now, '__iter__') and len(batch_now) == 2:
+        return batch_now[0].to(device), batch_now[1].to(device)
+    else:
+        raise ValueError
+
+
+def _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_all, stop_after_epochs, max_epochs):
+    if len(l0_valid_all) <= stop_after_epochs:
+        return False
+    elif len(l0_valid_all) >= max_epochs:
+        return True
+    else:
+        loss_all = np.asarray(l0_valid_all) + lambda_reg_all[-1] * np.asarray(l1_valid_all)
+        # if np.nanmin(loss_all[:-stop_after_epochs]) <= np.nanmin(loss_all[-stop_after_epochs:]):
+        if loss_all[-(stop_after_epochs + 1)] <= np.nanmin(loss_all[-stop_after_epochs:]):
             return True
         else:
             return False

@@ -1,4 +1,5 @@
 import numpy as np
+import scipy
 from ._interp import get_split_factors, get_types, get_dydxs, get_exps, get_pdf, get_cdf, get_ppf
 
 
@@ -113,7 +114,8 @@ class Interp1D:
         else:
             raise NotImplementedError
 
-    def sample(self, n=1, random_seed=None, sobol=True, check=True):
+    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, device='cpu',
+               check=True):
         if not isinstance(n, int):
             raise NotImplementedError
         if sobol:

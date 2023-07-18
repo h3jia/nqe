@@ -1,2 +1,3 @@
 from .interp import Interp1D
-from .nqe import QuantileLoss, MLP, QuantileMLP1D, NQE
+from .nqe import QuantileLoss, MLP, QuantileNet1D, QuantileInterp1D, QuantileNet, get_quantile_net
+from .nqe import train_1d, TrainResult
