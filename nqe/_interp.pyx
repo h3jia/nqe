@@ -1,8 +1,8 @@
 import numpy as np
 cimport numpy as np
 cimport cython
-from cython.parallel import prange
-from cython.parallel cimport prange
+# from cython.parallel import prange
+# from cython.parallel cimport prange
 from scipy.special.cython_special cimport erf, erfi, erfcx, dawsn
 from libc.stdlib cimport malloc, free
 from libc.math cimport exp, sqrt, pi, fabs, fmax, fmin
@@ -140,7 +140,7 @@ cdef int find_interval(const double* x, int m, double xval, int prev_interval=-1
 cdef double _get_split_factors(double* split_factors, const double* knots, const double* quantiles,
                                int n_interval, int central_width=1):
     cdef size_t i
-    for i in prange(n_interval, nogil=True, schedule='static'):
+    for i in range(n_interval): # prange(n_interval, nogil=True, schedule='static'):
         split_factors[i] = _get_split_factor(&knots[i], &quantiles[i], central_width)
 
 
@@ -449,8 +449,9 @@ def get_dydxs(double[::1] dydxs, const double[::1] knots, const double[::1] quan
               const int[::1] types, int n_interval, int i_start, int i_end):
     cdef size_t i
     cdef double h0, h1
-    for i in prange(_max(i_start, 1), _min(i_end + 1, n_interval), nogil=True,
-                    schedule='static'):
+    # for i in prange(_max(i_start, 1), _min(i_end + 1, n_interval), nogil=True,
+    #                 schedule='static'):
+    for i in range(_max(i_start, 1), _min(i_end + 1, n_interval)):
         if types[i] == LINEAR:
             dydxs[i] = (quantiles[i + 1] - quantiles[i]) / (knots[i + 1] - knots[i])
         elif types[i - 1] == LINEAR:
@@ -479,7 +480,8 @@ def get_exps(double[:, ::1] expas, double[::1] dpdxs, const double[::1] knots,
              const double[::1] quantiles, const double[::1] dydxs, const int[::1] types,
              int n_interval, int i_start, int i_end):
     cdef size_t i
-    for i in prange(i_start, i_end, nogil=True, schedule='static'):
+    # for i in prange(i_start, i_end, nogil=True, schedule='static'):
+    for i in range(i_start, i_end):
         if types[i] == DOUBLE_EXP or types[i] == RIGHT_END_EXP:
             dpdxs[i] = _get_right_end_dpdx(knots[i] - knots[i - 1], quantiles[i - 1], quantiles[i],
                                            dydxs[i - 1], dydxs[i])
