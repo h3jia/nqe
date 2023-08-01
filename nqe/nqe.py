@@ -432,11 +432,15 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
     module_list = []
     for i in range(low.size):
         if (i_start is None or i >= i_start) and (i_end is None or i < i_end):
+            if isinstance(embedding_net, (list, tuple)):
+                embedding_net_now = embedding_net[i]
+            else:
+                embedding_net_now = embedding_net
             module_list.append(QuantileNet1D(
                 i=i, low=low[i], high=high[i], quantiles_pred=quantiles_pred,
                 split_threshold=split_threshold, input_neurons=input_neurons + i,
                 hidden_neurons=hidden_neurons, activation=activation, batch_norm=batch_norm,
-                shortcut=shortcut, embedding_net=embedding_net
+                shortcut=shortcut, embedding_net=embedding_net_now
             ))
         else:
             module_list.append(None)
@@ -448,8 +452,14 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              rescale_data=False, target_loss_ratio=0., beta_reg=0.5, optimizer='Adam',
              learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
              learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
-             stop_after_epochs=20, max_epochs=300, return_best_epoch=True):
+             stop_after_epochs=20, max_epochs=300, return_best_epoch=True, verbose=True):
     quantile_net_1d.to(device)
+    if verbose is True:
+        verbose = 5
+    elif verbose is False:
+        verbose = 0
+    else:
+        verbose = int(verbose)
     if optimizer_kwargs is None:
         optimizer_kwargs = {}
     if scheduler_kwargs is None:
@@ -618,6 +628,9 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             if len(state_dict_cache) > stop_after_epochs + 1:
                 state_dict_cache = state_dict_cache[-(stop_after_epochs + 1):]
         scheduler.step()
+        if verbose > 0 and (i_epoch + 1) % verbose == 0:
+            print(f'finished epoch {i_epoch + 1}, l0_valid = {l0_valid:.5f}, l1_valid = '
+                  f'{l1_valid:.5f}, lambda_reg = {lambda_reg:.5f}')
 
     if return_best_epoch and i_epoch + 1 < max_epochs:
         state_dict = state_dict_cache[0]
@@ -642,9 +655,9 @@ TrainResult = namedtuple('TrainResult', ['state_dict', 'l0_train', 'l1_train', '
 
 def _decode_batch(batch_now, device):
     if isinstance(batch_now, torch.Tensor):
-        return None, batch.to(device)
+        return None, batch.to(device, torch.float)
     elif hasattr(batch_now, '__iter__') and len(batch_now) == 2:
-        return batch_now[0].to(device), batch_now[1].to(device)
+        return batch_now[0].to(device, torch.float), batch_now[1].to(device, torch.float)
     else:
         raise ValueError
 
