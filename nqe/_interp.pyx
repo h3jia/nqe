@@ -347,7 +347,7 @@ cdef double _int_p_dx(double a, double h, double p0, double dpdx0, double mass) 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _int_p_dx_args_expa(double a, void *args):
+cdef double _int_p_dx_args_expa(double a, void *args) noexcept:
     cdef int_p_dx_params_expa *myargs = <int_p_dx_params_expa *> args
     return _int_p_dx(a, myargs.h, myargs.p0, myargs.dpdx0, myargs.mass)
 
@@ -355,7 +355,7 @@ cdef double _int_p_dx_args_expa(double a, void *args):
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _int_p_dx_args_dpdx(double dpdx, void *args):
+cdef double _int_p_dx_args_dpdx(double dpdx, void *args) noexcept:
     cdef int_p_dx_params_dpdx *myargs = <int_p_dx_params_dpdx *> args
     return _int_p_dx(0., myargs.h, myargs.p0, dpdx, myargs.mass)
 
@@ -578,7 +578,7 @@ cdef inline double _cdf_cubic(double t, double h, double y0, double y1, double d
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _cdf_cubic_args(double t, void *args):
+cdef double _cdf_cubic_args(double t, void *args) noexcept:
     cdef cdf_params *myargs = <cdf_params *> args
     return _cdf_cubic(t, myargs.h, myargs.y0, myargs.y1, myargs.dydx0, myargs.dydx1) - myargs.y
 
@@ -599,7 +599,7 @@ cdef inline double _cdf_double_exp(double t, double h, double y0, double y1, dou
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _cdf_double_exp_args(double t, void *args):
+cdef double _cdf_double_exp_args(double t, void *args) noexcept:
     cdef cdf_params *myargs = <cdf_params *> args
     return _cdf_double_exp(t, myargs.h, myargs.y0, myargs.y1, myargs.dydx0, myargs.dydx1,
                            myargs.dpdx0, myargs.dpdx1, myargs.expa0, myargs.expa1) - myargs.y
@@ -616,7 +616,7 @@ cdef inline double _cdf_left_exp(double t, double y, double dydx, double dpdx, d
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _cdf_left_exp_args(double t, void *args):
+cdef double _cdf_left_exp_args(double t, void *args) noexcept:
     cdef cdf_params *myargs = <cdf_params *> args
     return _cdf_left_exp(t, myargs.y1, myargs.dydx1, myargs.dpdx1, myargs.expa1) - myargs.y
 
@@ -631,7 +631,7 @@ cdef inline double _cdf_right_exp(double t, double y, double dydx, double dpdx, 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _cdf_right_exp_args(double t, void *args):
+cdef double _cdf_right_exp_args(double t, void *args) noexcept:
     cdef cdf_params *myargs = <cdf_params *> args
     return _cdf_right_exp(t, myargs.y0, myargs.dydx0, myargs.dpdx0, myargs.expa0) - myargs.y
 
