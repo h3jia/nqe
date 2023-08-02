@@ -337,24 +337,46 @@ class QuantileNet1D(MLP):
         knots = np.concatenate([[self.low], knots_pred, [self.high]])
         return Interp1D(knots, self.quantiles, self.split_threshold).set_all()
 
-    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, device='cpu'):
+    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, batch_size=None,
+               device='cpu'):
+        random_seed = np.random.default_rng(random_seed)
         with torch.no_grad():
             self.to(device)
             self.eval()
             assert x is not None
             x = torch.as_tensor(x, dtype=torch.float)[None].to(device)
             if theta is None:
-                knots_pred = self(x, theta).detach().cpu().numpy()[0]
-                return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed, sobol=sobol)
+                if batch_size is not None and n > batch_size:
+                    batch_size = int(batch_size)
+                    assert batch_size > 0
+                    return np.concatenate(
+                        [self.sample(n=min(batch_size, n - i * batch_size), x=x, theta=None,
+                                     random_seed=random_seed, sobol=sobol, batch_size=batch_size,
+                                     device=device) for i in range(int(np.ceil(n / batch_size)))]
+                    )
+                else:
+                    knots_pred = self(x, theta).detach().cpu().numpy()[0]
+                    return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed,
+                                                             sobol=sobol)
             else:
                 theta = torch.atleast_2d(torch.as_tensor(theta, dtype=torch.float)).to(device)
                 assert theta.ndim == 2
                 assert theta.shape[0] == n
-                x = torch.tile(x, [n] + list(np.ones(x.ndim - 1, dtype=int)))
-                knots_pred = self(x, theta).detach().cpu().numpy()
-                return np.concatenate([
-                    self.interp_1d(k).sample(n=1, random_seed=random_seed, sobol=sobol) for k in
-                    knots_pred])
+                if batch_size is not None and n > batch_size:
+                    batch_size = int(batch_size)
+                    assert batch_size > 0
+                    return np.concatenate(
+                        [self.sample(n=min(batch_size, n - i * batch_size), x=x,
+                                     theta=theta[(i * batch_size):((i + 1) * batch_size)],
+                                     random_seed=random_seed, sobol=sobol, batch_size=batch_size,
+                                     device=device) for i in range(int(np.ceil(n / batch_size)))]
+                    )
+                else:
+                    x = torch.tile(x, [n] + list(np.ones(x.ndim - 1, dtype=int)))
+                    knots_pred = self(x, theta).detach().cpu().numpy()
+                    return np.concatenate([
+                        self.interp_1d(k).sample(n=1, random_seed=random_seed, sobol=sobol) for k in
+                        knots_pred])
 
 
 class QuantileInterp1D(Interp1D):
@@ -408,18 +430,29 @@ class QuantileNet(nn.ModuleList):
                 return False
         return True
 
-    def sample(self, n=1, x=None, random_seed=None, sobol=True, device='cpu'):
+    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, batch_size=None,
+               device='cpu'):
         random_seed = np.random.default_rng(random_seed)
         if not self.check():
             raise RuntimeError('This QuantileNet is not well defined.')
         with torch.no_grad():
-            theta_all = self[0].sample(n=n, x=x, random_seed=random_seed, sobol=sobol,
-                                       device=device)[:, None]
-            for i in range(1, len(self)):
-                theta_now = self[i].sample(n=n, x=x, theta=theta_all, random_seed=random_seed,
-                                           sobol=sobol, device=device)[: None]
-                theta_all = np.concatenate((theta_all, theta_now[:, None]), axis=1)
-            return theta_all
+            if batch_size is not None and n > batch_size:
+                batch_size = int(batch_size)
+                assert batch_size > 0
+                return np.concatenate(
+                    [self.sample(n=min(batch_size, n - i * batch_size), x=x, theta=None,
+                                 random_seed=random_seed, sobol=sobol, batch_size=batch_size,
+                                 device=device) for i in range(int(np.ceil(n / batch_size)))]
+                )
+            else:
+                theta_all = self[0].sample(n=n, x=x, random_seed=random_seed, sobol=sobol,
+                                           batch_size=batch_size, device=device)[:, None]
+                for i in range(1, len(self)):
+                    theta_now = self[i].sample(n=n, x=x, theta=theta_all, random_seed=random_seed,
+                                               sobol=sobol, batch_size=batch_size,
+                                               device=device)[: None]
+                    theta_all = np.concatenate((theta_all, theta_now[:, None]), axis=1)
+                return theta_all
 
 
 def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_end=None,

@@ -114,8 +114,8 @@ class Interp1D:
         else:
             raise NotImplementedError
 
-    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, device='cpu',
-               check=True):
+    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, batch_size=None,
+               device='cpu', check=True):
         if not isinstance(n, int):
             raise NotImplementedError
         if sobol:
