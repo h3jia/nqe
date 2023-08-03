@@ -6,6 +6,7 @@ from typing import Type, Any, Callable, Union, List, Optional, Tuple
 from .interp import Interp1D
 from copy import deepcopy
 from collections import namedtuple
+import warnings
 
 __all__ = ['QuantileLoss', 'MLP', 'QuantileNet1D', 'QuantileInterp1D', 'QuantileNet',
            'get_quantile_net', 'train_1d', 'TrainResult']
@@ -482,10 +483,11 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
 
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, alpha=0.,
-             rescale_data=False, target_loss_ratio=0., beta_reg=0.5, optimizer='Adam',
-             learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
-             learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
-             stop_after_epochs=20, max_epochs=300, return_best_epoch=True, verbose=True):
+             rescale_data=False, target_loss_ratio=0., beta_reg=0.5, drop_edge=False,
+             delayed_lambda_update=0, lambda_max_factor=10., optimizer='Adam', learning_rate=5e-4,
+             optimizer_kwargs=None, scheduler='StepLR', learning_rate_decay_period=5,
+             learning_rate_decay_gamma=0.9, scheduler_kwargs=None, stop_after_epochs=20,
+             max_epochs=300, return_best_epoch=True, verbose=True):
     quantile_net_1d.to(device)
     if verbose is True:
         verbose = 5
@@ -597,6 +599,13 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
     i_epoch = -1
     lambda_reg = 0.
     state_dict_cache = []
+    if lambda_max_factor is not None and target_loss_ratio > 0.:
+        lambda_max_factor = float(lambda_max_factor)
+        assert lambda_max_factor > 0.
+        lambda_max = lambda_max_factor * target_loss_ratio * (quantile_net_1d.high -
+                                                              quantile_net_1d.low)
+    else:
+        lambda_max = np.inf
 
     while not _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_all, stop_after_epochs,
                                  max_epochs):
@@ -613,7 +622,10 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                 y_now = quantile_net_1d(x_now, None, return_raw=True)
             l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
             if target_loss_ratio > 0.:
-                l1_now = torch.mean(y_now[1][..., 1:-1]**2)
+                if drop_edge:
+                    l1_now = torch.mean(y_now[1][..., 1:-1]**2)
+                else:
+                    l1_now = torch.mean(y_now[1]**2)
             else:
                 l1_now = torch.tensor(0.)
             loss_now = l0_now + lambda_reg * l1_now
@@ -641,7 +653,10 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                     y_now = quantile_net_1d(x_now, None, return_raw=True)
                 l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
                 if target_loss_ratio > 0.:
-                    l1_now = torch.mean(y_now[1][..., 1:-1]**2)
+                    if drop_edge:
+                        l1_now = torch.mean(y_now[1][..., 1:-1]**2)
+                    else:
+                        l1_now = torch.mean(y_now[1]**2)
                 else:
                     l1_now = torch.tensor(0.)
                 loss_now = l0_now + lambda_reg * l1_now
@@ -653,9 +668,14 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             l0_valid_all.append(l0_valid)
             l1_valid_all.append(l1_valid)
 
-        if target_loss_ratio > 0.:
+        if target_loss_ratio > 0. and i_epoch + 1 >= delayed_lambda_update:
             lambda_reg = ((1. - beta_reg) * lambda_reg +
                           beta_reg * target_loss_ratio * l0_train / l1_train)
+            if lambda_reg > lambda_max:
+                warnings.warn(f'at epoch {i_epoch + 1}, lambda_reg = {lambda_reg:.5f} exceeds its '
+                              f'max value {lambda_max:.5f}, please consider increasing '
+                              f'lambda_max_factor', RuntimeWarning)
+                lambda_reg = lambda_max
         if return_best_epoch:
             state_dict_cache.append(deepcopy(quantile_net_1d.state_dict()))
             if len(state_dict_cache) > stop_after_epochs + 1:
@@ -673,6 +693,10 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
         state_dict = deepcopy(quantile_net_1d.state_dict())
     # state_dict={k: v.cpu() for k, v in state_dict.items()}
 
+    if verbose > 0:
+        print(f'finished training dim {quantile_net_1d.i}, l0_valid_best = '
+              f'{np.asarray(l0_valid_all)[i_epoch]:.5f}, l1_valid_best = '
+              f'{np.asarray(l1_valid_all)[i_epoch]:.5f}')
     return quantile_net_1d, TrainResult(state_dict=state_dict,
                                         l0_train=np.asarray(l0_train_all),
                                         l1_train=np.asarray(l1_train_all),
@@ -696,10 +720,10 @@ def _decode_batch(batch_now, device):
 
 
 def _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_all, stop_after_epochs, max_epochs):
-    if len(l0_valid_all) <= stop_after_epochs:
-        return False
-    elif len(l0_valid_all) >= max_epochs:
+    if len(l0_valid_all) >= max_epochs:
         return True
+    elif len(l0_valid_all) <= stop_after_epochs:
+        return False
     else:
         loss_all = np.asarray(l0_valid_all) + lambda_reg_all[-1] * np.asarray(l1_valid_all)
         # if np.nanmin(loss_all[:-stop_after_epochs]) <= np.nanmin(loss_all[-stop_after_epochs:]):
