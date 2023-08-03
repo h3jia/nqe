@@ -484,10 +484,11 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, alpha=0.,
              rescale_data=False, target_loss_ratio=0., beta_reg=0.5, drop_edge=False,
-             delayed_lambda_update=0, lambda_max_factor=10., optimizer='Adam', learning_rate=5e-4,
-             optimizer_kwargs=None, scheduler='StepLR', learning_rate_decay_period=5,
-             learning_rate_decay_gamma=0.9, scheduler_kwargs=None, stop_after_epochs=20,
-             max_epochs=300, return_best_epoch=True, verbose=True):
+             lambda_max_factor=10., initial_max_ratio=0.1, initial_ratio_epochs=5,
+             lambda_min_l1=0.1, optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None,
+             scheduler='StepLR', learning_rate_decay_period=5, learning_rate_decay_gamma=0.9,
+             scheduler_kwargs=None, stop_after_epochs=20, max_epochs=300, return_best_epoch=True,
+             verbose=True):
     quantile_net_1d.to(device)
     if verbose is True:
         verbose = 5
@@ -614,6 +615,10 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
         quantile_net_1d.train()
         l0_train = 0.
         l1_train = 0.
+        if i_epoch + 1 <= initial_ratio_epochs:
+            target_loss_ratio_now = min(target_loss_ratio, initial_max_ratio)
+        else:
+            target_loss_ratio_now = target_loss_ratio
         for j, batch_now in enumerate(train_loader):
             x_now, theta_now = _decode_batch(batch_now, device)
             if quantile_net_1d.i > 0:
@@ -621,7 +626,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             else:
                 y_now = quantile_net_1d(x_now, None, return_raw=True)
             l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
-            if target_loss_ratio > 0.:
+            if target_loss_ratio_now > 0.:
                 if drop_edge:
                     l1_now = torch.mean(y_now[1][..., 1:-1]**2)
                 else:
@@ -652,7 +657,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                 else:
                     y_now = quantile_net_1d(x_now, None, return_raw=True)
                 l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
-                if target_loss_ratio > 0.:
+                if target_loss_ratio_now > 0.:
                     if drop_edge:
                         l1_now = torch.mean(y_now[1][..., 1:-1]**2)
                     else:
@@ -668,13 +673,13 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             l0_valid_all.append(l0_valid)
             l1_valid_all.append(l1_valid)
 
-        if target_loss_ratio > 0. and i_epoch + 1 >= delayed_lambda_update:
-            lambda_reg = ((1. - beta_reg) * lambda_reg +
-                          beta_reg * target_loss_ratio * l0_train / l1_train)
+        if target_loss_ratio_now > 0.:
+            lambda_reg = ((1. - beta_reg) * lambda_reg + beta_reg * target_loss_ratio_now *
+                          l0_train / max(l1_train, lambda_min_l1))
             if lambda_reg > lambda_max:
                 warnings.warn(f'at epoch {i_epoch + 1}, lambda_reg = {lambda_reg:.5f} exceeds its '
                               f'max value {lambda_max:.5f}, please consider increasing '
-                              f'lambda_max_factor', RuntimeWarning)
+                              f'lambda_max_factor or reducing target_loss_ratio', RuntimeWarning)
                 lambda_reg = lambda_max
         if return_best_epoch:
             state_dict_cache.append(deepcopy(quantile_net_1d.state_dict()))
