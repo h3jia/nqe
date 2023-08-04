@@ -484,10 +484,10 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, alpha=0.,
              rescale_data=False, target_loss_ratio=0., beta_reg=0.5, drop_edge=False,
-             lambda_max_factor=10., initial_max_ratio=0.1, initial_ratio_epochs=5,
-             lambda_min_l1=0.1, optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None,
-             scheduler='StepLR', learning_rate_decay_period=5, learning_rate_decay_gamma=0.9,
-             scheduler_kwargs=None, stop_after_epochs=20, max_epochs=300, return_best_epoch=True,
+             lambda_max_factor=2., initial_max_ratio=0.1, initial_ratio_epochs=10, optimizer='Adam',
+             learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
+             learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
+             stop_after_epochs=20, stop_tol=1e-3, max_epochs=200, return_best_epoch=True,
              verbose=True):
     quantile_net_1d.to(device)
     if verbose is True:
@@ -600,16 +600,9 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
     i_epoch = -1
     lambda_reg = 0.
     state_dict_cache = []
-    if lambda_max_factor is not None and target_loss_ratio > 0.:
-        lambda_max_factor = float(lambda_max_factor)
-        assert lambda_max_factor > 0.
-        lambda_max = lambda_max_factor * target_loss_ratio * (quantile_net_1d.high -
-                                                              quantile_net_1d.low)
-    else:
-        lambda_max = np.inf
 
     while not _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_all, stop_after_epochs,
-                                 max_epochs):
+                                 stop_tol, max_epochs):
         i_epoch += 1
         lambda_reg_all.append(lambda_reg)
         quantile_net_1d.train()
@@ -675,11 +668,14 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
 
         if target_loss_ratio_now > 0.:
             lambda_reg = ((1. - beta_reg) * lambda_reg + beta_reg * target_loss_ratio_now *
-                          l0_train / max(l1_train, lambda_min_l1))
+                          l0_valid / l1_valid)
+            i_best_l0 = np.argmin(l0_valid_all)
+            lambda_max = (lambda_max_factor * target_loss_ratio_now * l0_valid_all[i_best_l0] /
+                          l1_valid_all[i_best_l0])
             if lambda_reg > lambda_max:
-                warnings.warn(f'at epoch {i_epoch + 1}, lambda_reg = {lambda_reg:.5f} exceeds its '
-                              f'max value {lambda_max:.5f}, please consider increasing '
-                              f'lambda_max_factor or reducing target_loss_ratio', RuntimeWarning)
+                warnings.warn(f'lambda_reg exceeds its max value {lambda_max:.5f}, please consider '
+                              f'increasing lambda_max_factor or reducing target_loss_ratio',
+                              RuntimeWarning)
                 lambda_reg = lambda_max
         if return_best_epoch:
             state_dict_cache.append(deepcopy(quantile_net_1d.state_dict()))
@@ -724,7 +720,8 @@ def _decode_batch(batch_now, device):
         raise ValueError
 
 
-def _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_all, stop_after_epochs, max_epochs):
+def _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_all, stop_after_epochs, stop_tol,
+                       max_epochs):
     if len(l0_valid_all) >= max_epochs:
         return True
     elif len(l0_valid_all) <= stop_after_epochs:
@@ -732,7 +729,8 @@ def _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_all, stop_after_ep
     else:
         loss_all = np.asarray(l0_valid_all) + lambda_reg_all[-1] * np.asarray(l1_valid_all)
         # if np.nanmin(loss_all[:-stop_after_epochs]) <= np.nanmin(loss_all[-stop_after_epochs:]):
-        if loss_all[-(stop_after_epochs + 1)] <= np.nanmin(loss_all[-stop_after_epochs:]):
+        if loss_all[-(stop_after_epochs + 1)] <= (1 + stop_tol) * np.nanmin(
+            loss_all[-stop_after_epochs:]):
             return True
         else:
             return False
