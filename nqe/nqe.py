@@ -484,7 +484,7 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, alpha=0.,
              rescale_data=False, target_loss_ratio=0., beta_reg=0.5, drop_edge=False,
-             lambda_max_factor=2., initial_max_ratio=0.1, initial_ratio_epochs=10, optimizer='Adam',
+             lambda_max_factor=3., initial_max_ratio=0.1, initial_ratio_epochs=10, optimizer='Adam',
              learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
              learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
              stop_after_epochs=20, stop_tol=1e-3, max_epochs=200, return_best_epoch=True,
@@ -698,13 +698,10 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
         print(f'finished training dim {quantile_net_1d.i}, l0_valid_best = '
               f'{np.asarray(l0_valid_all)[i_epoch]:.5f}, l1_valid_best = '
               f'{np.asarray(l1_valid_all)[i_epoch]:.5f}')
-    return quantile_net_1d, TrainResult(state_dict=state_dict,
-                                        l0_train=np.asarray(l0_train_all),
-                                        l1_train=np.asarray(l1_train_all),
-                                        l0_valid=np.asarray(l0_valid_all),
-                                        l1_valid=np.asarray(l1_valid_all),
-                                        lambda_reg=np.asarray(lambda_reg_all),
-                                        i_epoch=i_epoch)
+    return TrainResult(state_dict=state_dict, l0_train=np.asarray(l0_train_all),
+                       l1_train=np.asarray(l1_train_all), l0_valid=np.asarray(l0_valid_all),
+                       l1_valid=np.asarray(l1_valid_all), lambda_reg=np.asarray(lambda_reg_all),
+                       i_epoch=i_epoch)
 
 
 TrainResult = namedtuple('TrainResult', ['state_dict', 'l0_train', 'l1_train', 'l0_valid',
