@@ -1,9 +1,9 @@
 import numpy as np
 import scipy
-from ._interp import get_split_factors, get_types, get_dydxs, get_exps, get_pdf, get_cdf, get_ppf
+from ._interp import _get_configs, _pdf_1_n, _pdf_n_n, _cdf_1_n, _cdf_n_n, _ppf_1_n, _ppf_n_n
 
 
-__all__ = ['Interp1D']
+__all__ = ['get_configs', 'pdf', 'cdf', 'ppf', 'sample', 'Interp1D']
 
 
 # type table
@@ -15,111 +15,117 @@ LINEAR = 4
 DOUBLE_EXP = 5
 LEFT_END_EXP = 6
 RIGHT_END_EXP = 7
-MERGE_EXP = 8
+# MERGE_EXP = 8
+
+
+# config index table
+I_KNOTS = 0
+I_QUANTILES = 1
+I_SPLIT_FACTORS = 2
+I_SPLIT_FACTORS_2 = 3
+I_TYPES = 4
+I_DYDXS = 5
+I_DPDXS = 6
+I_EXPAS_0 = 7
+I_EXPAS_1 = 8
+N_CONFIG_INDICES = 9
+
+
+def get_configs(knots, quantiles, split_threshold=1e-2):
+    knots = np.atleast_2d(knots).astype(np.float64)
+    quantiles = np.atleast_2d(quantiles).astype(np.float64)
+    assert knots.shape == quantiles.shape
+    assert knots.ndim == 2
+    assert knots.shape[1] >= 4
+    configs = np.full((knots.shape[0], N_CONFIG_INDICES, knots.shape[1]), np.nan, dtype=np.float64)
+    _get_configs(knots, quantiles, configs, knots.shape[0], knots.shape[1], split_threshold)
+    return configs
+
+
+def _check_configs(configs):
+    configs = np.asarray(configs, dtype=np.float64)
+    if configs.ndim == 2:
+        configs = configs[np.newaxis]
+    assert configs.ndim == 3 and configs.shape[1] == N_CONFIG_INDICES
+    return configs
+
+
+def _check_input(configs, x):
+    configs = _check_configs(configs)
+    x = np.atleast_1d(x).astype(np.float64)
+    assert x.ndim == 1
+    return configs, x, np.empty_like(x)
+
+
+def pdf(configs, x):
+    configs, x, y = _check_input(configs, x)
+    if configs.shape[0] == 1:
+        _pdf_1_n(configs, x, y, x.shape[0], configs.shape[2])
+    elif configs.shape[0] == x.shape[0]:
+        _pdf_n_n(configs, x, y, x.shape[0], configs.shape[2])
+    else:
+        raise ValueError('the shapes of configs and x do not match.')
+    return y
+
+
+def cdf(configs, x):
+    configs, x, y = _check_input(configs, x)
+    if configs.shape[0] == 1:
+        _cdf_1_n(configs, x, y, x.shape[0], configs.shape[2])
+    elif configs.shape[0] == x.shape[0]:
+        _cdf_n_n(configs, x, y, x.shape[0], configs.shape[2])
+    else:
+        raise ValueError('the shapes of configs and x do not match.')
+    return y
+
+
+def ppf(configs, y):
+    configs, y, x = _check_input(configs, y)
+    if configs.shape[0] == 1:
+        _ppf_1_n(configs, x, y, x.shape[0], configs.shape[2])
+    elif configs.shape[0] == y.shape[0]:
+        _ppf_n_n(configs, x, y, x.shape[0], configs.shape[2])
+    else:
+        raise ValueError('the shapes of configs and y do not match.')
+    return x
+
+
+def sample(configs, n=1, random_seed=None, sobol=True):
+    configs = _check_configs(configs)
+    n = int(n)
+    if n == 1:
+        if sobol:
+            return ppf(configs, scipy.stats.qmc.Sobol(
+                1, scramble=True, seed=random_seed, bits=64).random(configs.shape[0]).reshape(-1))
+        else:
+            return ppf(configs, np.random.default_rng(
+                random_seed).uniform(size=configs.shape[0]).reshape(-1))
+    elif n > 1 and configs.shape[0] == 1:
+        if sobol:
+            return ppf(configs, scipy.stats.qmc.Sobol(
+                1, scramble=True, seed=random_seed, bits=64).random(n).reshape(-1))
+        else:
+            return ppf(configs, np.random.default_rng(random_seed).uniform(size=n).reshape(-1))
+    else:
+        raise NotImplementedError('currently only supports 1) n=1, or 2) n>1, configs.shape[0]=1.')
 
 
 class Interp1D:
-    def __init__(self, knots, quantiles, split_threshold=1e-2):
-        self.knots = np.asarray(knots, dtype=float).reshape(-1)
-        self.quantiles = np.asarray(quantiles, dtype=float).reshape(-1)
-        assert self.knots.shape == self.quantiles.shape
-        assert self.knots.size >= 4
-        assert self.quantiles[0] == 0.
-        assert self.quantiles[-1] == 1.
-        self.n_interval = self.knots.size - 1
-        assert self.n_interval >= 4
-        self._knots = np.copy(self.knots)         # make a copy since some intervals
-        self._quantiles = np.copy(self.quantiles) # can be merged
-        self.split_factors = np.full(self.n_interval, np.nan)
-        self.split_factors[:2] = np.inf
-        self.split_factors[-2:] = np.inf
-        self.split_factors_2 = np.full(self.n_interval - 1, np.nan)
-        self.split_factors_2[:2] = np.inf
-        self.split_factors_2[-2:] = np.inf
-        self.types = np.full(self.n_interval, UNDEFINED, dtype=np.int32)
-        # self.types[0] = LEFT_END_EXP
-        # self.types[-1] = RIGHT_END_EXP
-        self.dydxs = np.full(self.n_interval + 1, np.nan)
-        self.dpdxs = np.full(self.n_interval + 1, np.nan)
-        self.expas = np.full((self.n_interval, 2), np.nan)
-        self.split_threshold = float(split_threshold)
-
-    def set_interval(self, i_start, i_end):
-        assert i_start >= 0 and i_end <= self.n_interval and i_start < i_end
-        get_split_factors(self.split_factors, self.split_factors_2, self.knots, self.quantiles,
-                          self.n_interval, max(i_start - 4, 2), min(i_end + 4, self.n_interval - 2))
-        get_types(self.types, self.split_factors, self.split_factors_2, self.n_interval,
-                  i_start - 2, i_end + 2, self.split_threshold)
-        i_merge = np.where(self.types == MERGE_EXP)[0]
-        if i_merge.size > 0:
-            self.knots = np.delete(self.knots, i_merge)
-            self.quantiles = np.delete(self.quantiles, i_merge)
-            self.n_interval -= i_merge.size
-            self.types = np.delete(self.types, i_merge)
-            self.dydxs = np.delete(self.dydxs, i_merge)
-            self.dpdxs = np.delete(self.dpdxs, i_merge)
-            self.expas = np.delete(self.expas, i_merge, axis=0)
-        get_dydxs(self.dydxs, self.knots, self.quantiles, self.types, self.n_interval, i_start,
-                  i_end)
-        get_exps(self.expas, self.dpdxs, self.knots, self.quantiles, self.dydxs, self.types,
-                 self.n_interval, i_start, i_end)
-
-    def set_all(self):
-        self.set_interval(0, self.n_interval)
-        return self
-
-    def check(self, x, target='knots'):
-        xmin = np.min(x)
-        xmax = np.max(x)
-        # assert xmin >= self.knots[0] and xmax <= self.knots[-1]
-        imin = max(np.searchsorted(eval('self.' + target), xmin, side='right') - 1, 0)
-        imax = min(np.searchsorted(eval('self.' + target), xmax, side='right') - 1,
-                   self.n_interval - 1)
-        if not np.all(self.types[imin:(imax + 1)]):
-            self.set_interval(imin, imax + 1)
-
-    def pdf(self, x, check=True):
-        x = np.asarray(x, dtype=float)
-        if x.ndim <= 1 and x.size > 0:
-            if check:
-                self.check(x, 'knots')
-            out = np.empty_like(np.atleast_1d(x))
-            get_pdf(np.atleast_1d(x), out, self.knots, self.quantiles, self.dydxs, self.dpdxs,
-                    self.expas, self.types, out.size, self.n_interval)
-            return out if x.ndim == 1 else float(out)
+    def __init__(self, knots=None, quantiles=None, split_threshold=1e-2, configs=None):
+        if configs is not None:
+            self.configs = _check_configs(configs)
         else:
-            raise NotImplementedError
+            self.configs = get_configs(knots, quantiles, split_threshold)
 
-    def cdf(self, x, check=True):
-        x = np.asarray(x, dtype=float)
-        if x.ndim <= 1 and x.size > 0:
-            if check:
-                self.check(x, 'knots')
-            out = np.empty_like(np.atleast_1d(x))
-            get_cdf(np.atleast_1d(x), out, self.knots, self.quantiles, self.dydxs, self.dpdxs,
-                    self.expas, self.types, out.size, self.n_interval)
-            return out if x.ndim == 1 else float(out)
-        else:
-            raise NotImplementedError
+    def pdf(self, x):
+        return pdf(self.configs, x)
 
-    def ppf(self, y, check=True):
-        y = np.asarray(y, dtype=float)
-        if y.ndim <= 1 and y.size > 0:
-            if check:
-                self.check(y, 'quantiles')
-            out = np.empty_like(np.atleast_1d(y))
-            get_ppf(out, np.atleast_1d(y), self.knots, self.quantiles, self.dydxs, self.dpdxs,
-                    self.expas, self.types, out.size, self.n_interval)
-            return out if y.ndim == 1 else float(out)
-        else:
-            raise NotImplementedError
+    def cdf(self, x):
+        return cdf(self.configs, x)
+
+    def ppf(self, y):
+        return ppf(self.configs, y)
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, batch_size=None,
-               device='cpu', check=True):
-        if not isinstance(n, int):
-            raise NotImplementedError
-        if sobol:
-            return self.ppf(scipy.stats.qmc.Sobol(
-                1, scramble=True, seed=random_seed, bits=64).random(n).flatten(), check)
-        else:
-            return self.ppf(np.random.default_rng(random_seed).uniform(size=n), check)
+               device='cpu'):
+        return sample(self.configs, n, random_seed, sobol)

@@ -336,7 +336,7 @@ class QuantileNet1D(MLP):
         knots_pred = np.asarray(knots_pred)
         assert knots_pred.ndim == 1
         knots = np.concatenate([[self.low], knots_pred, [self.high]])
-        return Interp1D(knots, self.quantiles, self.split_threshold).set_all()
+        return Interp1D(knots=knots, quantiles=self.quantiles, split_threshold=self.split_threshold)
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, batch_size=None,
                device='cpu'):
@@ -409,9 +409,11 @@ class QuantileInterp1D(Interp1D):
         self.i = 0
         quantiles_pred = _set_quantiles_pred(quantiles_pred)
         knots_pred = np.quantile(theta, quantiles_pred)
-        super(QuantileInterp1D, self).__init__(np.concatenate([[low], knots_pred, [high]]),
-                                               np.concatenate([[0.], self.quantiles_pred, [1.]]),
-                                               split_threshold)
+        super(QuantileInterp1D, self).__init__(
+            knots=np.concatenate([[low], knots_pred, [high]]),
+            quantiles=np.concatenate([[0.], self.quantiles_pred, [1.]]),
+            split_threshold=split_threshold
+        )
 
 
 class QuantileNet(nn.ModuleList):
@@ -481,6 +483,9 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
     return QuantileNet(module_list)
 
 
+# TODO: allow negative loss ratio
+# TODO: allow fixed lambda reg
+# TODO: best epoch when reached max
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, alpha=0.,
              rescale_data=False, target_loss_ratio=0., beta_reg=0.5, drop_edge=False,
