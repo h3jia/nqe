@@ -330,17 +330,21 @@ class QuantileNet1D(MLP):
 
         Parameters
         ----------
-        knots_pred : 1-d array_like of float
+        knots_pred : 1-d or 2-d array_like of float
             The locations of predicted quantiles to be interpolated.
         """
-        knots_pred = np.asarray(knots_pred)
-        assert knots_pred.ndim == 1
-        knots = np.concatenate([[self.low], knots_pred, [self.high]])
+        knots_pred = np.atleast_2d(knots_pred)
+        assert knots_pred.ndim == 2
+        knots = np.concatenate([np.full((knots_pred.shape[0], 1), self.low),
+                                knots_pred,
+                                np.full((knots_pred.shape[0], 1), self.high)], axis=1)
         return Interp1D(knots=knots, quantiles=self.quantiles, split_threshold=self.split_threshold)
 
-    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, batch_size=None,
-               device='cpu'):
+    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
+               batch_size=None, device='cpu'):
         random_seed = np.random.default_rng(random_seed)
+        i = self.i if i is None else int(i)
+        d = 1 if d is None else int(d)
         with torch.no_grad():
             self.to(device)
             self.eval()
@@ -358,7 +362,7 @@ class QuantileNet1D(MLP):
                 else:
                     knots_pred = self(x, theta).detach().cpu().numpy()[0]
                     return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed,
-                                                             sobol=sobol)
+                                                             sobol=sobol, i=i, d=d)
             else:
                 theta = torch.atleast_2d(torch.as_tensor(theta, dtype=torch.float)).to(device)
                 assert theta.ndim == 2
@@ -375,9 +379,8 @@ class QuantileNet1D(MLP):
                 else:
                     x = torch.tile(x, [n] + list(np.ones(x.ndim - 1, dtype=int)))
                     knots_pred = self(x, theta).detach().cpu().numpy()
-                    return np.concatenate([
-                        self.interp_1d(k).sample(n=1, random_seed=random_seed, sobol=sobol) for k in
-                        knots_pred])
+                    return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed,
+                                                             sobol=sobol, i=i, d=d)
 
 
 class QuantileInterp1D(Interp1D):
@@ -449,10 +452,11 @@ class QuantileNet(nn.ModuleList):
                 )
             else:
                 theta_all = self[0].sample(n=n, x=x, random_seed=random_seed, sobol=sobol,
-                                           batch_size=batch_size, device=device)[:, None]
+                                           d=len(self), batch_size=batch_size,
+                                           device=device)[:, None]
                 for i in range(1, len(self)):
                     theta_now = self[i].sample(n=n, x=x, theta=theta_all, random_seed=random_seed,
-                                               sobol=sobol, batch_size=batch_size,
+                                               sobol=sobol, d=len(self), batch_size=batch_size,
                                                device=device)[: None]
                     theta_all = np.concatenate((theta_all, theta_now[:, None]), axis=1)
                 return theta_all
@@ -492,7 +496,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              lambda_max_factor=3., initial_max_ratio=0.1, initial_ratio_epochs=10, optimizer='Adam',
              learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
              learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
-             stop_after_epochs=20, stop_tol=1e-3, max_epochs=200, return_best_epoch=True,
+             stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
              verbose=True):
     quantile_net_1d.to(device)
     if verbose is True:

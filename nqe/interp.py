@@ -34,9 +34,16 @@ N_CONFIG_INDICES = 9
 def get_configs(knots, quantiles, split_threshold=1e-2):
     knots = np.atleast_2d(knots).astype(np.float64)
     quantiles = np.atleast_2d(quantiles).astype(np.float64)
-    assert knots.shape == quantiles.shape
-    assert knots.ndim == 2
-    assert knots.shape[1] >= 4
+    assert knots.shape[1] == quantiles.shape[1] >= 4
+    assert knots.ndim == quantiles.ndim == 2
+    if knots.shape[0] == quantiles.shape[0]:
+        pass
+    elif knots.shape[0] == 1 and quantiles.shape[0] > 1:
+        knots = np.repeat(knots, quantiles.shape[0], axis=0)
+    elif quantiles.shape[0] == 1 and knots.shape[0] > 1:
+        quantiles = np.repeat(quantiles, knots.shape[0], axis=0)
+    else:
+        raise ValueError('the shapes of knots and quantiles do not match.')
     configs = np.full((knots.shape[0], N_CONFIG_INDICES, knots.shape[1]), np.nan, dtype=np.float64)
     _get_configs(knots, quantiles, configs, knots.shape[0], knots.shape[1], split_threshold)
     return configs
@@ -90,24 +97,20 @@ def ppf(configs, y):
     return x
 
 
-def sample(configs, n=1, random_seed=None, sobol=True):
+def sample(configs, n=1, random_seed=None, sobol=True, i=None, d=None):
     configs = _check_configs(configs)
     n = int(n)
-    if n == 1:
+    i = 0 if i is None else int(i)
+    d = 1 if d is None else int(d)
+    if configs.shape[0] == 1 or configs.shape[0] == n:
         if sobol:
             return ppf(configs, scipy.stats.qmc.Sobol(
-                1, scramble=True, seed=random_seed, bits=64).random(configs.shape[0]).reshape(-1))
-        else:
-            return ppf(configs, np.random.default_rng(
-                random_seed).uniform(size=configs.shape[0]).reshape(-1))
-    elif n > 1 and configs.shape[0] == 1:
-        if sobol:
-            return ppf(configs, scipy.stats.qmc.Sobol(
-                1, scramble=True, seed=random_seed, bits=64).random(n).reshape(-1))
+                d, scramble=True, seed=random_seed, bits=64).random(n)[:, i])
         else:
             return ppf(configs, np.random.default_rng(random_seed).uniform(size=n).reshape(-1))
     else:
-        raise NotImplementedError('currently only supports 1) n=1, or 2) n>1, configs.shape[0]=1.')
+        raise NotImplementedError('currently only supports configs.shape[0] == 1 or '
+                                  'configs.shape[0] == n.')
 
 
 class Interp1D:
@@ -126,6 +129,6 @@ class Interp1D:
     def ppf(self, y):
         return ppf(self.configs, y)
 
-    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, batch_size=None,
-               device='cpu'):
-        return sample(self.configs, n, random_seed, sobol)
+    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
+               batch_size=None, device='cpu'):
+        return sample(self.configs, n, random_seed, sobol, i, d)
