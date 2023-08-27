@@ -119,16 +119,30 @@ class Interp1D:
             self.configs = _check_configs(configs)
         else:
             self.configs = get_configs(knots, quantiles, split_threshold)
+        self._ok = True # need this for nqe._QuantileInterp1D
 
     def pdf(self, x):
-        return pdf(self.configs, x)
+        if self._ok:
+            return pdf(self.configs, x)
+        else:
+            raise RuntimeError('this Interp1D has not been fitted.')
 
     def cdf(self, x):
-        return cdf(self.configs, x)
+        if self._ok:
+            return cdf(self.configs, x)
+        else:
+            raise RuntimeError('this Interp1D has not been fitted.')
 
     def ppf(self, y):
-        return ppf(self.configs, y)
+        if self._ok:
+            return ppf(self.configs, y)
+        else:
+            raise RuntimeError('this Interp1D has not been fitted.')
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
                batch_size=None, device='cpu'):
-        return sample(self.configs, n, random_seed, sobol, i, d)
+        if self._ok:
+            return sample(self.configs, n, random_seed, sobol, i, d)
+        else:
+            raise RuntimeError('this Interp1D has not been fitted.')
+

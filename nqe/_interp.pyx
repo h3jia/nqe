@@ -40,7 +40,7 @@ ctypedef struct cdf_params:
 
 cdef double XTOL = 1e-10, RTOL = 1e-10
 cdef int MITR = 300
-cdef double P_TAIL_LIMIT = 0.4
+cdef double P_TAIL_LIMIT = 0.75
 cdef int UNDEFINED = 0, NORMAL_CUBIC = 1, LEFT_END_CUBIC = 2, RIGHT_END_CUBIC = 3, LINEAR = 4
 cdef int DOUBLE_EXP = 5, LEFT_END_EXP = 6, RIGHT_END_EXP = 7 #, MERGE_EXP = 8
 cdef int I_KNOTS = 0, I_QUANTILES = 1, I_SPLIT_FACTORS = 2, I_SPLIT_FACTORS_2 = 3, I_TYPES = 4
