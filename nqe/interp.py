@@ -31,7 +31,7 @@ I_EXPAS_1 = 8
 N_CONFIG_INDICES = 9
 
 
-def get_configs(knots, quantiles, split_threshold=1e-2):
+def get_configs(knots, quantiles, split_threshold=1e-2, p_tail_limit=0.75):
     knots = np.atleast_2d(knots).astype(np.float64)
     quantiles = np.atleast_2d(quantiles).astype(np.float64)
     assert knots.shape[1] == quantiles.shape[1] >= 4
@@ -45,7 +45,8 @@ def get_configs(knots, quantiles, split_threshold=1e-2):
     else:
         raise ValueError('the shapes of knots and quantiles do not match.')
     configs = np.full((knots.shape[0], N_CONFIG_INDICES, knots.shape[1]), np.nan, dtype=np.float64)
-    _get_configs(knots, quantiles, configs, knots.shape[0], knots.shape[1], split_threshold)
+    _get_configs(knots, quantiles, configs, knots.shape[0], knots.shape[1], split_threshold,
+                 p_tail_limit)
     return configs
 
 
@@ -114,11 +115,12 @@ def sample(configs, n=1, random_seed=None, sobol=True, i=None, d=None):
 
 
 class Interp1D:
-    def __init__(self, knots=None, quantiles=None, split_threshold=1e-2, configs=None):
+    def __init__(self, knots=None, quantiles=None, split_threshold=1e-2, p_tail_limit=0.75,
+                 configs=None):
         if configs is not None:
             self.configs = _check_configs(configs)
         else:
-            self.configs = get_configs(knots, quantiles, split_threshold)
+            self.configs = get_configs(knots, quantiles, split_threshold, p_tail_limit)
         self._ok = True # need this for nqe._QuantileInterp1D
 
     def pdf(self, x):

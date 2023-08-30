@@ -249,6 +249,9 @@ class QuantileNet1D(MLP):
     split_threshold : float, optional
         The threshold for splitting into two peaks to account for multimodality during the
         interpolation. Set to ``1e-2`` by default.
+    p_tail_limit : float, optional
+        Lower bound of the tail pdf in the one-side boundary interpolation scheme. Set to ``0.75``
+        by default.
     kwargs : dict, optional
         Additional keyword arguments to be passed to ``MLP``. Note that the ``output_neurons``
         parameter will be automatically set according to ``quantiles_pred``.
@@ -258,7 +261,7 @@ class QuantileNet1D(MLP):
     See ``MLP`` for the additional parameters, some of which are required by the initializer.
     """
     def __init__(self, i, low, high, quantiles_pred=12, quantile_method='cumsum', binary_depth=0,
-                 split_threshold=1e-2, **kwargs):
+                 split_threshold=1e-2, p_tail_limit=0.75, **kwargs):
         self.quantiles_pred = _set_quantiles_pred(quantiles_pred)
         kwargs['output_neurons'] = self.quantiles_pred.size + 1
         super(QuantileNet1D, self).__init__(**kwargs)
@@ -271,6 +274,7 @@ class QuantileNet1D(MLP):
             raise ValueError
         self.binary_depth = int(binary_depth)
         self.split_threshold = float(split_threshold)
+        self.p_tail_limit = float(p_tail_limit)
 
     def forward(self, x=None, theta=None, return_raw=False):
         """
@@ -338,7 +342,8 @@ class QuantileNet1D(MLP):
         knots = np.concatenate([np.full((knots_pred.shape[0], 1), self.low),
                                 knots_pred,
                                 np.full((knots_pred.shape[0], 1), self.high)], axis=1)
-        return Interp1D(knots=knots, quantiles=self.quantiles, split_threshold=self.split_threshold)
+        return Interp1D(knots=knots, quantiles=self.quantiles, split_threshold=self.split_threshold,
+                        p_tail_limit=self.p_tail_limit)
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
                batch_size=None, device='cpu'):
@@ -408,8 +413,12 @@ class QuantileInterp1D(Interp1D):
     split_threshold : float, optional
         The threshold for splitting into two peaks to account for multimodality during the
         interpolation. Set to ``1e-2`` by default.
+    p_tail_limit : float, optional
+        Lower bound of the tail pdf in the one-side boundary interpolation scheme. Set to ``0.75``
+        by default.
     """
-    def __init__(self, theta, low, high, quantiles_pred=12, split_threshold=1e-2):
+    def __init__(self, theta, low, high, quantiles_pred=12, split_threshold=1e-2,
+                 p_tail_limit=0.75):
         if isinstance(theta, torch.Tensor):
             theta = theta.detach().cpu().numpy()
         self.i = 0
@@ -418,7 +427,8 @@ class QuantileInterp1D(Interp1D):
         super(QuantileInterp1D, self).__init__(
             knots=np.concatenate([[low], knots_pred, [high]]),
             quantiles=np.concatenate([[0.], quantiles_pred, [1.]]),
-            split_threshold=split_threshold
+            split_threshold=split_threshold,
+            p_tail_limit=p_tail_limit
         )
 
 
@@ -426,19 +436,20 @@ class _QuantileInterp1D(QuantileInterp1D, nn.Module):
     """
     Placeholder for potentially-not-yet-fitted QuantileInterp1D.
     """
-    def __init__(self, low, high, quantiles_pred=12, split_threshold=1e-2):
+    def __init__(self, low, high, quantiles_pred=12, split_threshold=1e-2, p_tail_limit=0.75):
         self.i = 0
         self.low = low
         self.high = high
         self.quantiles_pred = quantiles_pred
         self.split_threshold = split_threshold
+        self.p_tail_limit = p_tail_limit
         self._ok = False
         nn.Module.__init__(self)
         self._placeholder_module = nn.ReLU() # not used, only to make this a valid nn.Module
 
     def fit(self, theta):
         QuantileInterp1D.__init__(self, theta, self.low, self.high, self.quantiles_pred,
-                                  self.split_threshold)
+                                  self.split_threshold, self.p_tail_limit)
 
 
 class QuantileNet(nn.ModuleList):
@@ -487,8 +498,8 @@ class QuantileNet(nn.ModuleList):
 
 
 def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_end=None,
-                     quantiles_pred=12, split_threshold=1e-2, activation='relu', batch_norm=False,
-                     shortcut=True, embedding_net=None):
+                     quantiles_pred=12, split_threshold=1e-2, p_tail_limit=0.75, activation='relu',
+                     batch_norm=False, shortcut=True, embedding_net=None):
     low = np.asarray(low)
     high = np.asarray(high)
     if not (low.shape == high.shape and low.ndim == 1):
@@ -499,7 +510,8 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
             if input_neurons == 0 and i == 0:
                 module_list.append(_QuantileInterp1D(low=low[0], high=high[0],
                                                      quantiles_pred=quantiles_pred,
-                                                     split_threshold=split_threshold))
+                                                     split_threshold=split_threshold,
+                                                     p_tail_limit=p_tail_limit))
             else:
                 if isinstance(embedding_net, (list, tuple)):
                     embedding_net_now = embedding_net[i]
@@ -507,9 +519,10 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
                     embedding_net_now = embedding_net
                 module_list.append(QuantileNet1D(
                     i=i, low=low[i], high=high[i], quantiles_pred=quantiles_pred,
-                    split_threshold=split_threshold, input_neurons=input_neurons + i,
-                    hidden_neurons=hidden_neurons, activation=activation, batch_norm=batch_norm,
-                    shortcut=shortcut, embedding_net=embedding_net_now
+                    split_threshold=split_threshold, p_tail_limit=p_tail_limit,
+                    input_neurons=input_neurons + i, hidden_neurons=hidden_neurons,
+                    activation=activation, batch_norm=batch_norm, shortcut=shortcut,
+                    embedding_net=embedding_net_now
                 ))
         else:
             module_list.append(None)
@@ -519,6 +532,7 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
 # TODO: allow negative loss ratio
 # TODO: allow fixed lambda reg
 # TODO: best epoch when reached max
+# TODO: first no drop_edge, then drop_edge
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, alpha=0.,
              rescale_data=False, target_loss_ratio=0., beta_reg=0.5, drop_edge=False,

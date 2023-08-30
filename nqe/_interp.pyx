@@ -40,7 +40,6 @@ ctypedef struct cdf_params:
 
 cdef double XTOL = 1e-10, RTOL = 1e-10
 cdef int MITR = 300
-cdef double P_TAIL_LIMIT = 0.75
 cdef int UNDEFINED = 0, NORMAL_CUBIC = 1, LEFT_END_CUBIC = 2, RIGHT_END_CUBIC = 3, LINEAR = 4
 cdef int DOUBLE_EXP = 5, LEFT_END_EXP = 6, RIGHT_END_EXP = 7 #, MERGE_EXP = 8
 cdef int I_KNOTS = 0, I_QUANTILES = 1, I_SPLIT_FACTORS = 2, I_SPLIT_FACTORS_2 = 3, I_TYPES = 4
@@ -311,7 +310,7 @@ cdef double _int_p_dx_args_dpdx(double dpdx, void *args) noexcept nogil:
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _get_dydx_1(double h0, double h1, double m0, double m1) nogil:
+cdef double _get_dydx_1(double h0, double h1, double m0, double m1, double p_tail_limit=0.75) nogil:
     cdef double d = ((2 * h0 + h1) * m0 - h0 * m1) / (h0 + h1)
     # if d * m0 <= 0.:
     #     return 0.5 * m0
@@ -321,9 +320,9 @@ cdef double _get_dydx_1(double h0, double h1, double m0, double m1) nogil:
     #     return 3. * m0
     # return d
     if m0 > 0.:
-        return fmin(fmax(d, P_TAIL_LIMIT * m0), 3. * m0)
+        return fmin(fmax(d, p_tail_limit * m0), 3. * m0)
     elif m0 < 0.:
-        return fmin(fmax(d, 3. * m0), P_TAIL_LIMIT * m0)
+        return fmin(fmax(d, 3. * m0), p_tail_limit * m0)
     else:
         return 0.
 
@@ -344,17 +343,17 @@ cdef double _get_dydx_2(double h0, double h1, double m0, double m1) nogil:
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef void _get_split_factors(double* split_factors, const double* knots, const double* quantiles,
-                             int n_interval, int central_width=1) nogil:
+                             int n_interval, int central_width=1, double p_tail_limit=0.75) nogil:
     cdef size_t i
     for i in range(n_interval): # prange(n_interval, nogil=True, schedule='static'):
-        split_factors[i] = _get_split_factor(&knots[i], &quantiles[i], central_width)
+        split_factors[i] = _get_split_factor(&knots[i], &quantiles[i], central_width, p_tail_limit)
 
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef double _get_split_factor(const double* knots, const double* quantiles,
-                              int central_width=1) nogil:
+                              int central_width=1, double p_tail_limit=0.75) nogil:
     cdef int offset = central_width - 1
     cdef double y0 = quantiles[1], y1 = quantiles[2]
     cdef double y2 = quantiles[3 + offset], y3 = quantiles[4 + offset]
@@ -366,8 +365,8 @@ cdef double _get_split_factor(const double* knots, const double* quantiles,
     cdef double m3 = (quantiles[4 + offset] - quantiles[3 + offset]) / h3
     cdef double m4 = (quantiles[5 + offset] - quantiles[4 + offset]) / h4
     cdef double dydx0 = _get_dydx_2(h0, h1, m0, m1)
-    cdef double dydx1 = _get_dydx_1(h1, h0, m1, m0)
-    cdef double dydx2 = _get_dydx_1(h3, h4, m3, m4)
+    cdef double dydx1 = _get_dydx_1(h1, h0, m1, m0, p_tail_limit)
+    cdef double dydx2 = _get_dydx_1(h3, h4, m3, m4, p_tail_limit)
     cdef double dydx3 = _get_dydx_2(h3, h4, m3, m4)
     cdef double dpdx1, dpdx2, a1, a2, p1a, p2a
     if dydx1 > 0. and dydx2 > 0.: # should be always true for cdf interp here
@@ -468,7 +467,7 @@ cdef void _get_cubic_types(double* types, int n_m) nogil:
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef void _get_dydxs(double* dydxs, const double* knots, const double* quantiles,
-                     const double* types, int n_interval) nogil:
+                     const double* types, int n_interval, double p_tail_limit=0.75) nogil:
     cdef size_t i
     cdef double h0, h1
     # for i in prange(_max(i_start, 1), _min(i_end + 1, n_interval), nogil=True,
@@ -487,12 +486,12 @@ cdef void _get_dydxs(double* dydxs, const double* knots, const double* quantiles
             h0 = knots[i + 1] - knots[i]
             h1 = knots[i + 2] - knots[i + 1]
             dydxs[i] = _get_dydx_1(h0, h1, (quantiles[i + 1] - quantiles[i]) / h0,
-                                   (quantiles[i + 2] - quantiles[i + 1]) / h1)
+                                   (quantiles[i + 2] - quantiles[i + 1]) / h1, p_tail_limit)
         elif iround(types[i]) == DOUBLE_EXP or iround(types[i]) == RIGHT_END_EXP:
             h0 = knots[i] - knots[i - 1]
             h1 = knots[i - 1] - knots[i - 2]
             dydxs[i] = _get_dydx_1(h0, h1, (quantiles[i] - quantiles[i - 1]) / h0,
-                                   (quantiles[i - 1] - quantiles[i - 2]) / h1)
+                                   (quantiles[i - 1] - quantiles[i - 2]) / h1, p_tail_limit)
 
 
 @cython.wraparound(False)
@@ -804,7 +803,7 @@ def _ppf_n_n(const double[:, :, ::1] configs, double[::1] xs, const double[::1] 
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef void _get_config(const double[::1] knots, const double[::1] quantiles, double[:, ::1] configs,
-                      int n_2, double split_threshold=1e-2) nogil:
+                      int n_2, double split_threshold=1e-2, double p_tail_limit=0.75) nogil:
     cdef size_t i
     cdef int n_m
     cdef size_t[4] i_all = [0, 1, n_2 - 3, n_2 - 2]
@@ -823,16 +822,16 @@ cdef void _get_config(const double[::1] knots, const double[::1] quantiles, doub
     configs[I_TYPES, n_2 - 2] = RIGHT_END_EXP
 
     _get_split_factors(&configs[I_SPLIT_FACTORS, 2], &configs[I_KNOTS, 0], &configs[I_QUANTILES, 0],
-                       n_2 - 4, 1)
+                       n_2 - 4, 1, p_tail_limit)
     _get_split_factors(&configs[I_SPLIT_FACTORS_2, 2], &configs[I_KNOTS, 0],
-                       &configs[I_QUANTILES, 0], n_2 - 5, 2)
+                       &configs[I_QUANTILES, 0], n_2 - 5, 2, p_tail_limit)
 
     _get_exp_types(&configs[I_TYPES, 0], &configs[I_SPLIT_FACTORS, 0],
                    &configs[I_SPLIT_FACTORS_2, 0], n_2, split_threshold)
     n_m = _merge_exp_types(configs, n_2)
     _get_cubic_types(&configs[I_TYPES, 0], n_m)
     _get_dydxs(&configs[I_DYDXS, 0], &configs[I_KNOTS, 0], &configs[I_QUANTILES, 0],
-               &configs[I_TYPES, 0], n_m - 1)
+               &configs[I_TYPES, 0], n_m - 1, p_tail_limit)
     _get_exps(&configs[I_EXPAS_0, 0], &configs[I_EXPAS_1, 0], &configs[I_DPDXS, 0],
               &configs[I_KNOTS, 0], &configs[I_QUANTILES, 0], &configs[I_DYDXS, 0],
               &configs[I_TYPES, 0], n_m - 1)
@@ -842,7 +841,8 @@ cdef void _get_config(const double[::1] knots, const double[::1] quantiles, doub
 @cython.boundscheck(False)
 @cython.cdivision(True)
 def _get_configs(const double[:, ::1] knots, const double[:, ::1] quantiles,
-                 double[:, :, ::1] configs, int n_0, int n_2, double split_threshold=1e-2):
+                 double[:, :, ::1] configs, int n_0, int n_2, double split_threshold=1e-2,
+                 double p_tail_limit=0.75):
     cdef size_t i
     for i in prange(n_0, nogil=True, schedule='static'):
-        _get_config(knots[i], quantiles[i], configs[i], n_2, split_threshold)
+        _get_config(knots[i], quantiles[i], configs[i], n_2, split_threshold, p_tail_limit)
