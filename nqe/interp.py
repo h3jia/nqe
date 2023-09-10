@@ -60,7 +60,7 @@ def _check_configs(configs):
 
 def _check_input(configs, x):
     configs = _check_configs(configs)
-    x = np.atleast_1d(x).astype(np.float64)
+    x = np.atleast_1d(np.ascontiguousarray(x, dtype=np.float64))
     assert x.ndim == 1
     return configs, x, np.empty_like(x)
 
@@ -141,10 +141,8 @@ class Interp1D:
         else:
             raise RuntimeError('this Interp1D has not been fitted.')
 
-    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
-               batch_size=None, device='cpu'):
+    def sample(self, n, random_seed=None, sobol=True, i=None, d=None):
         if self._ok:
             return sample(self.configs, n, random_seed, sobol, i, d)
         else:
             raise RuntimeError('this Interp1D has not been fitted.')
-

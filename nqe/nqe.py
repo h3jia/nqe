@@ -98,12 +98,10 @@ class MLP(nn.Module):
             self.embedding_net = embedding_net
         else:
             raise ValueError
-        self.train_loss = []
-        self.valid_loss = []
-        self.mu_x = 0.
-        self.sigma_x = 1.
-        self.mu_theta = 0.
-        self.sigma_theta = 1.
+        self.register_buffer('mu_x', torch.tensor(0.))
+        self.register_buffer('sigma_x', torch.tensor(1.))
+        self.register_buffer('mu_theta', torch.tensor(0.))
+        self.register_buffer('sigma_theta', torch.tensor(1.))
 
     def _make_fc(self, input_neurons, output_neurons, hidden_neurons, activation, batch_norm,
                  shortcut):
@@ -196,6 +194,7 @@ class MLP(nn.Module):
             x = theta
         else:
             raise ValueError
+        x = x.contiguous()
 
         if len(self.fc_layers) == 1:
             return self.fc_layers[0](x)
@@ -345,10 +344,10 @@ class QuantileNet1D(MLP):
         return Interp1D(knots=knots, quantiles=self.quantiles, split_threshold=self.split_threshold,
                         p_tail_limit=self.p_tail_limit)
 
-    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
-               batch_size=None, device='cpu'):
+    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, d=None, batch_size=None,
+               device='cpu'):
         random_seed = np.random.default_rng(random_seed)
-        i = self.i if i is None else int(i)
+        i = self.i
         d = 1 if d is None else int(d)
         with torch.no_grad():
             self.to(device)
@@ -373,22 +372,69 @@ class QuantileNet1D(MLP):
             else:
                 theta = torch.atleast_2d(torch.as_tensor(theta, dtype=torch.float)).to(device)
                 assert theta.ndim == 2
-                assert theta.shape[0] == n
+                if not theta.shape[0] == n or theta.shape[0] == 1:
+                    raise NotImplementedError('currently only supports theta.shape[0] == n or '
+                                              'theta.shape[0] == 1.')
                 if batch_size is not None and n > batch_size:
                     batch_size = int(batch_size)
                     assert batch_size > 0
                     return np.concatenate(
                         [self.sample(n=min(batch_size, n - i * batch_size), x=x,
-                                     theta=theta[(i * batch_size):((i + 1) * batch_size)],
+                                     theta=(theta[(i * batch_size):((i + 1) * batch_size)]
+                                            if theta.shape[0] > 1 else theta),
                                      random_seed=random_seed, sobol=sobol, batch_size=batch_size,
                                      device=device) for i in range(int(np.ceil(n / batch_size)))]
                     )
                 else:
                     if x is not None:
-                        x = torch.tile(x, [n] + list(np.ones(x.ndim - 1, dtype=int)))
+                        x = torch.tile(x, [theta.shape[0]] + list(np.ones(x.ndim - 1, dtype=int)))
                     knots_pred = self(x, theta).detach().cpu().numpy()
                     return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed,
                                                              sobol=sobol, i=i, d=d)
+
+    def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
+        i = self.i
+        with torch.no_grad():
+            self.to(device)
+            self.eval()
+            if x is not None:
+                x = torch.as_tensor(x, dtype=torch.float)[None].to(device)
+            if theta is None:
+                raise ValueError('theta cannot be None.')
+            else:
+                theta = torch.as_tensor(theta, dtype=torch.float).to(device)
+                if theta.ndim == 0:
+                    theta = theta[None, None]
+                elif theta.ndim == 1:
+                    warnings.warn('theta.ndim == 1 is ambiguous here and may lead to unexpected '
+                                  'behavior, please consider giving me a 2-dim Tensor.',
+                                  RuntimeWarning)
+                    theta = theta[None]
+                elif theta.ndim == 2:
+                    pass
+                else:
+                    raise ValueError('theta should be a 2-dim Tensor.')
+                assert theta.shape[1] >= i + 1
+                if batch_size is not None and theta.shape[0] > batch_size:
+                    batch_size = int(batch_size)
+                    assert batch_size > 0
+                    return np.concatenate(
+                        [self.pdf(x=x, theta=theta[(i * batch_size):((i + 1) * batch_size)],
+                                  batch_size=batch_size, device=device) for i in
+                                  range(int(np.ceil(theta.shape[0] / batch_size)))]
+                    )
+                else:
+                    if x is not None:
+                        x = torch.tile(x, [theta.shape[0]] + list(np.ones(x.ndim - 1, dtype=int)))
+                    if i > 0:
+                        theta_prev = theta[:, :i].contiguous()
+                    elif i == 0:
+                        theta_prev = None
+                    else:
+                        raise RuntimeError('invalid value for i.')
+                    theta_now = theta[:, i].detach().cpu().numpy().astype(np.float64)
+                    knots_pred = self(x, theta_prev).detach().cpu().numpy()
+                    return self.interp_1d(knots_pred).pdf(theta_now)
 
 
 class QuantileInterp1D(Interp1D):
@@ -430,6 +476,27 @@ class QuantileInterp1D(Interp1D):
             split_threshold=split_threshold,
             p_tail_limit=p_tail_limit
         )
+
+    def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
+               batch_size=None, device='cpu'):
+        return Interp1D.sample(self, n=n, random_seed=random_seed, sobol=sobol, i=i, d=d)
+
+    def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
+        try:
+            if isinstance(theta, torch.Tensor):
+                theta = np.atleast_1d(np.ascontiguousarray(theta.detach().cpu().numpy(),
+                                                           dtype=np.float64))
+            else:
+                theta = np.atleast_1d(np.ascontiguousarray(theta, dtype=np.float64))
+            if theta.ndim == 1:
+                pass
+            elif theta.ndim == 2:
+                theta = theta[:, self.i].copy()
+            else:
+                raise ValueError('invalid dim for theta.')
+        except Exception:
+            raise ValueError('invalid value for theta.')
+        return Interp1D.pdf(self, theta)
 
 
 class _QuantileInterp1D(QuantileInterp1D, nn.Module):
@@ -495,6 +562,10 @@ class QuantileNet(nn.ModuleList):
                                                device=device)[: None]
                     theta_all = np.concatenate((theta_all, theta_now[:, None]), axis=1)
                 return theta_all
+
+    def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
+        return np.prod(
+            [s.pdf(x=x, theta=theta, batch_size=batch_size, device=device) for s in self], axis=0)
 
 
 def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_end=None,
