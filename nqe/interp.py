@@ -1,6 +1,7 @@
 import numpy as np
 import scipy
 from ._interp import _get_configs, _pdf_1_n, _pdf_n_n, _cdf_1_n, _cdf_n_n, _ppf_1_n, _ppf_n_n
+from ._interp import _cdf_1_n_local, _cdf_n_n_local
 
 
 __all__ = ['get_configs', 'pdf', 'cdf', 'ppf', 'sample', 'Interp1D']
@@ -76,12 +77,16 @@ def pdf(configs, x):
     return y
 
 
-def cdf(configs, x):
+def cdf(configs, x, local=False):
     configs, x, y = _check_input(configs, x)
     if configs.shape[0] == 1:
         _cdf_1_n(configs, x, y, x.shape[0], configs.shape[2])
+        if local:
+            _cdf_1_n_local(configs, y, y.shape[0], configs.shape[2])
     elif configs.shape[0] == x.shape[0]:
         _cdf_n_n(configs, x, y, x.shape[0], configs.shape[2])
+        if local:
+            _cdf_n_n_local(configs, y, y.shape[0], configs.shape[2])
     else:
         raise ValueError('the shapes of configs and x do not match.')
     return y
@@ -129,9 +134,9 @@ class Interp1D:
         else:
             raise RuntimeError('this Interp1D has not been fitted.')
 
-    def cdf(self, x):
+    def cdf(self, x, local=False):
         if self._ok:
-            return cdf(self.configs, x)
+            return cdf(self.configs, x, local)
         else:
             raise RuntimeError('this Interp1D has not been fitted.')
 

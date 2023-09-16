@@ -12,7 +12,8 @@ cdef extern from "numpy/npy_math.h":
     double inf "NPY_INFINITY"
 
 
-__all__ = ['_pdf_1_n', '_pdf_n_n', '_cdf_1_n', '_cdf_n_n', '_ppf_1_n', '_ppf_n_n', '_get_configs']
+__all__ = ['_get_configs', '_pdf_1_n', '_pdf_n_n', '_cdf_1_n', '_cdf_n_n', '_ppf_1_n', '_ppf_n_n',
+           '_cdf_1_n_local', '_cdf_n_n_local']
 
 
 ctypedef struct int_p_dx_params_expa:
@@ -732,6 +733,55 @@ def _cdf_n_n(const double[:, :, ::1] configs, const double[::1] xs, double[::1] 
     cdef size_t i
     for i in prange(n_point, nogil=True, schedule='static'):
         ys[i] = _get_cdf(xs[i], configs[i], n_2)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef double _get_cdf_local(double y, const double[:, ::1] configs, int n_2) nogil:
+    cdef int n_m = _get_n_m(configs, n_2)
+    cdef int j = _find_interval(&configs[I_QUANTILES, 0], n_m, y) - 1, dj
+    cdef double y0 = nan, y1 = nan
+    if y == 0.:
+        return 0.
+    elif y == 1.:
+        return 1.
+    else:
+        for dj in range(0, j + 1):
+            if (iround(configs[I_TYPES, j - dj]) == DOUBLE_EXP and
+                y >= 0.5 * (configs[I_QUANTILES, j - dj] + configs[I_QUANTILES, j - dj + 1])):
+                y0 = 0.5 * (configs[I_QUANTILES, j - dj] + configs[I_QUANTILES, j - dj + 1])
+                break
+            if iround(configs[I_TYPES, j - dj]) == LEFT_END_EXP:
+                y0 = configs[I_QUANTILES, j - dj]
+                break
+        for dj in range(0, n_m - j - 1):
+            if (iround(configs[I_TYPES, j + dj]) == DOUBLE_EXP and
+                y < 0.5 * (configs[I_QUANTILES, j + dj] + configs[I_QUANTILES, j + dj + 1])):
+                y1 = 0.5 * (configs[I_QUANTILES, j + dj] + configs[I_QUANTILES, j + dj + 1])
+                break
+            if iround(configs[I_TYPES, j + dj]) == RIGHT_END_EXP:
+                y1 = configs[I_QUANTILES, j + dj + 1]
+                break
+        return (y - y0) / (y1 - y0)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+def _cdf_1_n_local(const double[:, :, ::1] configs, double[::1] ys, int n_point, int n_2):
+    cdef size_t i
+    for i in prange(n_point, nogil=True, schedule='static'):
+        ys[i] = _get_cdf_local(ys[i], configs[0], n_2)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+def _cdf_n_n_local(const double[:, :, ::1] configs, double[::1] ys, int n_point, int n_2):
+    cdef size_t i
+    for i in prange(n_point, nogil=True, schedule='static'):
+        ys[i] = _get_cdf_local(ys[i], configs[i], n_2)
 
 
 @cython.wraparound(False)
