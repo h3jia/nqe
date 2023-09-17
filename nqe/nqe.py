@@ -6,6 +6,7 @@ from typing import Type, Any, Callable, Union, List, Optional, Tuple
 from .interp import Interp1D
 from copy import deepcopy
 from collections import namedtuple
+from scipy.stats import norm, chi2
 import warnings
 
 __all__ = ['QuantileLoss', 'MLP', 'QuantileNet1D', 'QuantileInterp1D', 'QuantileNet',
@@ -392,7 +393,7 @@ class QuantileNet1D(MLP):
                     return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed,
                                                              sobol=sobol, i=i, d=d)
 
-    def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
+    def _f_interp(self, x, theta, batch_size, device, target, **kwargs):
         i = self.i
         with torch.no_grad():
             self.to(device)
@@ -419,9 +420,10 @@ class QuantileNet1D(MLP):
                     batch_size = int(batch_size)
                     assert batch_size > 0
                     return np.concatenate(
-                        [self.pdf(x=x, theta=theta[(i * batch_size):((i + 1) * batch_size)],
-                                  batch_size=batch_size, device=device) for i in
-                                  range(int(np.ceil(theta.shape[0] / batch_size)))]
+                        [self._f_interp(x=x, theta=theta[(i * batch_size):((i + 1) * batch_size)],
+                                        batch_size=batch_size, device=device, target=target,
+                                        **kwargs)
+                         for i in range(int(np.ceil(theta.shape[0] / batch_size)))]
                     )
                 else:
                     if x is not None:
@@ -434,7 +436,27 @@ class QuantileNet1D(MLP):
                         raise RuntimeError('invalid value for i.')
                     theta_now = theta[:, i].detach().cpu().numpy().astype(np.float64)
                     knots_pred = self(x, theta_prev).detach().cpu().numpy()
-                    return self.interp_1d(knots_pred).pdf(theta_now)
+                    if target == 'pdf':
+                        return self.interp_1d(knots_pred).pdf(x=theta_now)
+                    elif target == 'cdf':
+                        return self.interp_1d(knots_pred).cdf(x=theta_now, **kwargs)
+                    else:
+                        raise ValueError('invalid value for target.')
+
+    def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
+        return self._f_interp(x=x, theta=theta, batch_size=batch_size, device=device, target='pdf')
+
+    def cdf(self, x=None, theta=None, local=False, batch_size=None, device='cpu'):
+        return self._f_interp(x=x, theta=theta, batch_size=batch_size, device=device, target='cdf',
+                              local=local)
+
+    def q_rank(self, x=None, theta=None, local=True, ref_dist='normal', batch_size=None,
+               device='cpu'):
+        q = self.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device)
+        if isinstance(ref_dist, str) and ref_dist.lower() in ('normal', 'norm', 'gaussian'):
+            return chi2.cdf(norm.ppf(q)**2, df=1)
+        else:
+            raise NotImplementedError('currently only normal is supported for ref_dist.')
 
 
 class QuantileInterp1D(Interp1D):
@@ -481,7 +503,7 @@ class QuantileInterp1D(Interp1D):
                batch_size=None, device='cpu'):
         return Interp1D.sample(self, n=n, random_seed=random_seed, sobol=sobol, i=i, d=d)
 
-    def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
+    def _check_theta(self, theta):
         try:
             if isinstance(theta, torch.Tensor):
                 theta = np.atleast_1d(np.ascontiguousarray(theta.detach().cpu().numpy(),
@@ -496,7 +518,23 @@ class QuantileInterp1D(Interp1D):
                 raise ValueError('invalid dim for theta.')
         except Exception:
             raise ValueError('invalid value for theta.')
-        return Interp1D.pdf(self, theta)
+        return theta
+
+    def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
+        theta = self._check_theta(theta)
+        return Interp1D.pdf(self, x=theta)
+
+    def cdf(self, x=None, theta=None, local=False, batch_size=None, device='cpu'):
+        theta = self._check_theta(theta)
+        return Interp1D.cdf(self, x=theta, local=local)
+
+    def q_rank(self, x=None, theta=None, local=True, ref_dist='normal', batch_size=None,
+               device='cpu'):
+        q = self.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device)
+        if isinstance(ref_dist, str) and ref_dist.lower() in ('normal', 'norm', 'gaussian'):
+            return chi2.cdf(norm.ppf(q)**2, df=1)
+        else:
+            raise NotImplementedError('currently only normal is supported for ref_dist.')
 
 
 class _QuantileInterp1D(QuantileInterp1D, nn.Module):
@@ -566,6 +604,15 @@ class QuantileNet(nn.ModuleList):
     def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
         return np.prod(
             [s.pdf(x=x, theta=theta, batch_size=batch_size, device=device) for s in self], axis=0)
+
+    def q_rank(self, x=None, theta=None, local=True, ref_dist='normal', batch_size=None,
+               device='cpu'):
+        q = np.array([s.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device) for
+                      s in self])
+        if isinstance(ref_dist, str) and ref_dist.lower() in ('normal', 'norm', 'gaussian'):
+            return chi2.cdf(np.sum(norm.ppf(q)**2, axis=0), df=len(self))
+        else:
+            raise NotImplementedError('currently only normal is supported for ref_dist.')
 
 
 def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_end=None,
