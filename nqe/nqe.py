@@ -35,17 +35,16 @@ class QuantileLoss:
     ----------
     quantiles_pred : 1-d array_like
         The quantiles you want to predict, should be larger than 0 and smaller than 1.
-    alpha : float, optional
-        Each term in the loss will be weighted by ``exp(alpha * abs(quantile - 0.5))``. Set to
-        ``0.`` by default.
+    a0 : float, optional
+        Each term in the loss will be weighted by ``exp(a0 * abs(quantile - 0.5))``. Set to ``0.``
+        by default.
     device : str, optional
         The device on which you train the model. Set to ``'cpu'`` by default.
     """
-    def __init__(self, quantiles_pred, alpha=0., device='cpu'):
+    def __init__(self, quantiles_pred, a0=0., device='cpu'):
         self.quantiles_pred = torch.as_tensor(quantiles_pred, dtype=torch.float).to(device)
-        self.alpha = float(alpha)
-        self._weights = (
-            torch.exp(self.alpha * torch.abs(self.quantiles_pred - 0.5))[None]).to(device)
+        self.a0 = float(a0)
+        self._weights = (torch.exp(self.a0 * torch.abs(self.quantiles_pred - 0.5))[None]).to(device)
 
     def __call__(self, input, target):
         # in_now shape: # of points, (# of data dims + # of previous theta dims)
@@ -246,12 +245,12 @@ class QuantileNet1D(MLP):
         the moment.
     binary_depth : int, optional
         The depth of binary tree. Only used if ``'quantile_method'`` is ``'binary'``.
+    p_tail_limit : float, optional
+        Lower bound of the tail pdf in the one-side boundary interpolation scheme. Set to ``0.7``
+        by default.
     split_threshold : float, optional
         The threshold for splitting into two peaks to account for multimodality during the
         interpolation. Set to ``1e-2`` by default.
-    p_tail_limit : float, optional
-        Lower bound of the tail pdf in the one-side boundary interpolation scheme. Set to ``0.75``
-        by default.
     kwargs : dict, optional
         Additional keyword arguments to be passed to ``MLP``. Note that the ``output_neurons``
         parameter will be automatically set according to ``quantiles_pred``.
@@ -261,7 +260,7 @@ class QuantileNet1D(MLP):
     See ``MLP`` for the additional parameters, some of which are required by the initializer.
     """
     def __init__(self, i, low, high, quantiles_pred=12, quantile_method='cumsum', binary_depth=0,
-                 split_threshold=1e-2, p_tail_limit=0.75, **kwargs):
+                 p_tail_limit=0.7, split_threshold=1e-2, **kwargs):
         self.quantiles_pred = _set_quantiles_pred(quantiles_pred)
         kwargs['output_neurons'] = self.quantiles_pred.size + 1
         super(QuantileNet1D, self).__init__(**kwargs)
@@ -273,8 +272,8 @@ class QuantileNet1D(MLP):
         if self.quantile_method not in ('cumsum', 'binary'):
             raise ValueError
         self.binary_depth = int(binary_depth)
-        self.split_threshold = float(split_threshold)
         self.p_tail_limit = float(p_tail_limit)
+        self.split_threshold = float(split_threshold)
 
     def forward(self, x=None, theta=None, return_raw=False):
         """
@@ -342,8 +341,8 @@ class QuantileNet1D(MLP):
         knots = np.concatenate([np.full((knots_pred.shape[0], 1), self.low),
                                 knots_pred,
                                 np.full((knots_pred.shape[0], 1), self.high)], axis=1)
-        return Interp1D(knots=knots, quantiles=self.quantiles, split_threshold=self.split_threshold,
-                        p_tail_limit=self.p_tail_limit)
+        return Interp1D(knots=knots, quantiles=self.quantiles, p_tail_limit=self.p_tail_limit,
+                        split_threshold=self.split_threshold)
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, d=None, batch_size=None,
                device='cpu'):
@@ -467,7 +466,7 @@ class QuantileInterp1D(Interp1D):
 
     Parameters
     ----------
-    theta : 1_d array_like of float
+    theta : 1-d array_like of float
         The first dimension of theta.
     low : float
         The lower bound of prior.
@@ -478,15 +477,15 @@ class QuantileInterp1D(Interp1D):
         ``quantiles_pred`` bins and therefore fit the evenly spaced ``quantiles_pred - 1`` quantiles
         between ``0`` (exclusive) and ``1`` (exclusive). Otherwise, should be in ascending order,
         larger than 0, and smaller than 1. Set to ``12`` by default.
+    p_tail_limit : float, optional
+        Lower bound of the tail pdf in the one-side boundary interpolation scheme. Set to ``0.7``
+        by default.
     split_threshold : float, optional
         The threshold for splitting into two peaks to account for multimodality during the
         interpolation. Set to ``1e-2`` by default.
-    p_tail_limit : float, optional
-        Lower bound of the tail pdf in the one-side boundary interpolation scheme. Set to ``0.75``
-        by default.
     """
-    def __init__(self, theta, low, high, quantiles_pred=12, split_threshold=1e-2,
-                 p_tail_limit=0.75):
+    def __init__(self, theta, low, high, quantiles_pred=12, p_tail_limit=0.7,
+                 split_threshold=1e-2):
         if isinstance(theta, torch.Tensor):
             theta = theta.detach().cpu().numpy()
         self.i = 0
@@ -495,8 +494,8 @@ class QuantileInterp1D(Interp1D):
         super(QuantileInterp1D, self).__init__(
             knots=np.concatenate([[low], knots_pred, [high]]),
             quantiles=np.concatenate([[0.], quantiles_pred, [1.]]),
-            split_threshold=split_threshold,
-            p_tail_limit=p_tail_limit
+            p_tail_limit=p_tail_limit,
+            split_threshold=split_threshold
         )
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
@@ -541,20 +540,22 @@ class _QuantileInterp1D(QuantileInterp1D, nn.Module):
     """
     Placeholder for potentially-not-yet-fitted QuantileInterp1D.
     """
-    def __init__(self, low, high, quantiles_pred=12, split_threshold=1e-2, p_tail_limit=0.75):
+    def __init__(self, low, high, quantiles_pred=12, p_tail_limit=0.7, split_threshold=1e-2):
         self.i = 0
         self.low = low
         self.high = high
         self.quantiles_pred = quantiles_pred
-        self.split_threshold = split_threshold
         self.p_tail_limit = p_tail_limit
+        self.split_threshold = split_threshold
         self._ok = False
         nn.Module.__init__(self)
         self._placeholder_module = nn.ReLU() # not used, only to make this a valid nn.Module
 
     def fit(self, theta):
-        QuantileInterp1D.__init__(self, theta, self.low, self.high, self.quantiles_pred,
-                                  self.split_threshold, self.p_tail_limit)
+        QuantileInterp1D.__init__(self, theta=theta, low=self.low, high=self.high,
+                                  quantiles_pred=self.quantiles_pred,
+                                  p_tail_limit=self.p_tail_limit,
+                                  split_threshold=self.split_threshold)
 
 
 class QuantileNet(nn.ModuleList):
@@ -616,7 +617,7 @@ class QuantileNet(nn.ModuleList):
 
 
 def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_end=None,
-                     quantiles_pred=12, split_threshold=1e-2, p_tail_limit=0.75, activation='relu',
+                     quantiles_pred=12, p_tail_limit=0.7, split_threshold=1e-2, activation='relu',
                      batch_norm=False, shortcut=True, embedding_net=None):
     low = np.asarray(low)
     high = np.asarray(high)
@@ -628,8 +629,8 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
             if input_neurons == 0 and i == 0:
                 module_list.append(_QuantileInterp1D(low=low[0], high=high[0],
                                                      quantiles_pred=quantiles_pred,
-                                                     split_threshold=split_threshold,
-                                                     p_tail_limit=p_tail_limit))
+                                                     p_tail_limit=p_tail_limit,
+                                                     split_threshold=split_threshold))
             else:
                 if isinstance(embedding_net, (list, tuple)):
                     embedding_net_now = embedding_net[i]
@@ -637,7 +638,7 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
                     embedding_net_now = embedding_net
                 module_list.append(QuantileNet1D(
                     i=i, low=low[i], high=high[i], quantiles_pred=quantiles_pred,
-                    split_threshold=split_threshold, p_tail_limit=p_tail_limit,
+                    p_tail_limit=p_tail_limit, split_threshold=split_threshold,
                     input_neurons=input_neurons + i, hidden_neurons=hidden_neurons,
                     activation=activation, batch_norm=batch_norm, shortcut=shortcut,
                     embedding_net=embedding_net_now
@@ -652,8 +653,8 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
 # TODO: best epoch when reached max
 # TODO: first no drop_edge, then drop_edge
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
-             validation_fraction=0.15, train_loader=None, valid_loader=None, alpha=0.,
-             rescale_data=False, target_loss_ratio=0., beta_reg=0.5, drop_edge=False,
+             validation_fraction=0.15, train_loader=None, valid_loader=None, a0=0., a1=0., b1p=1.,
+             k1=2., rescale_data=False, target_loss_ratio=0., beta_reg=0.5, drop_edge=False,
              lambda_max_factor=3., initial_max_ratio=0.1, initial_ratio_epochs=10, optimizer='Adam',
              learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
              learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
@@ -765,7 +766,10 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             quantile_net_1d.set_rescaling(mu_x=mu_x, sigma_x=sigma_x, mu_theta=mu_theta,
                                           sigma_theta=sigma_theta)
 
-        loss = QuantileLoss(quantile_net_1d.quantiles_pred, alpha, device=device)
+        loss = QuantileLoss(quantile_net_1d.quantiles_pred, a0, device=device)
+        quantiles_c = np.concatenate([[0.], quantile_net_1d.quantiles_pred, [1.]])
+        quantiles_c = torch.as_tensor(0.5 * (quantiles_c[:-1] + quantiles_c[1:]), dtype=torch.float)
+        w_a1 = (torch.exp(a1 * torch.abs(quantiles_c - 0.5))[None]).to(device)
 
         if isinstance(optimizer, type) and issubclass(optimizer, torch.optim.Optimizer):
             optimizer = optimizer(quantile_net_1d.parameters(), **optimizer_kwargs)
@@ -823,10 +827,11 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                     y_now = quantile_net_1d(x_now, None, return_raw=True)
                 l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
                 if target_loss_ratio_now > 0.:
+                    y_raw = torch.abs(w_a1 * y_now[1])
                     if drop_edge:
-                        l1_now = torch.mean(y_now[1][..., 1:-1]**2)
+                        l1_now = torch.mean(y_raw[..., 1:-1]**k1)
                     else:
-                        l1_now = torch.mean(y_now[1]**2)
+                        l1_now = torch.mean(y_raw**k1)
                 else:
                     l1_now = torch.tensor(0.)
                 loss_now = l0_now + lambda_reg * l1_now
@@ -854,10 +859,11 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                         y_now = quantile_net_1d(x_now, None, return_raw=True)
                     l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
                     if target_loss_ratio_now > 0.:
+                        y_raw = torch.abs(w_a1 * y_now[1])
                         if drop_edge:
-                            l1_now = torch.mean(y_now[1][..., 1:-1]**2)
+                            l1_now = torch.mean(y_raw[..., 1:-1]**k1)
                         else:
-                            l1_now = torch.mean(y_now[1]**2)
+                            l1_now = torch.mean(y_raw**k1)
                     else:
                         l1_now = torch.tensor(0.)
                     loss_now = l0_now + lambda_reg * l1_now

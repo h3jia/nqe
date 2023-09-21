@@ -311,7 +311,7 @@ cdef double _int_p_dx_args_dpdx(double dpdx, void *args) noexcept nogil:
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _get_dydx_1(double h0, double h1, double m0, double m1, double p_tail_limit=0.75) nogil:
+cdef double _get_dydx_1(double h0, double h1, double m0, double m1, double p_tail_limit) nogil:
     cdef double d = ((2 * h0 + h1) * m0 - h0 * m1) / (h0 + h1)
     # if d * m0 <= 0.:
     #     return 0.5 * m0
@@ -344,17 +344,17 @@ cdef double _get_dydx_2(double h0, double h1, double m0, double m1) nogil:
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef void _get_split_factors(double* split_factors, const double* knots, const double* quantiles,
-                             int n_interval, int central_width=1, double p_tail_limit=0.75) nogil:
+                             int n_interval, double p_tail_limit, int central_width=1) nogil:
     cdef size_t i
     for i in range(n_interval): # prange(n_interval, nogil=True, schedule='static'):
-        split_factors[i] = _get_split_factor(&knots[i], &quantiles[i], central_width, p_tail_limit)
+        split_factors[i] = _get_split_factor(&knots[i], &quantiles[i], p_tail_limit, central_width)
 
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef double _get_split_factor(const double* knots, const double* quantiles,
-                              int central_width=1, double p_tail_limit=0.75) nogil:
+cdef double _get_split_factor(const double* knots, const double* quantiles, double p_tail_limit,
+                              int central_width=1) nogil:
     cdef int offset = central_width - 1
     cdef double y0 = quantiles[1], y1 = quantiles[2]
     cdef double y2 = quantiles[3 + offset], y3 = quantiles[4 + offset]
@@ -468,7 +468,7 @@ cdef void _get_cubic_types(double* types, int n_m) nogil:
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef void _get_dydxs(double* dydxs, const double* knots, const double* quantiles,
-                     const double* types, int n_interval, double p_tail_limit=0.75) nogil:
+                     const double* types, int n_interval, double p_tail_limit) nogil:
     cdef size_t i
     cdef double h0, h1
     # for i in prange(_max(i_start, 1), _min(i_end + 1, n_interval), nogil=True,
@@ -853,7 +853,7 @@ def _ppf_n_n(const double[:, :, ::1] configs, double[::1] xs, const double[::1] 
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef void _get_config(const double[::1] knots, const double[::1] quantiles, double[:, ::1] configs,
-                      int n_2, double split_threshold=1e-2, double p_tail_limit=0.75) nogil:
+                      int n_2, double p_tail_limit, double split_threshold=1e-2) nogil:
     cdef size_t i
     cdef int n_m
     cdef size_t[4] i_all = [0, 1, n_2 - 3, n_2 - 2]
@@ -872,9 +872,9 @@ cdef void _get_config(const double[::1] knots, const double[::1] quantiles, doub
     configs[I_TYPES, n_2 - 2] = RIGHT_END_EXP
 
     _get_split_factors(&configs[I_SPLIT_FACTORS, 2], &configs[I_KNOTS, 0], &configs[I_QUANTILES, 0],
-                       n_2 - 4, 1, p_tail_limit)
+                       n_2 - 4, p_tail_limit, 1)
     _get_split_factors(&configs[I_SPLIT_FACTORS_2, 2], &configs[I_KNOTS, 0],
-                       &configs[I_QUANTILES, 0], n_2 - 5, 2, p_tail_limit)
+                       &configs[I_QUANTILES, 0], n_2 - 5, p_tail_limit, 2)
 
     _get_exp_types(&configs[I_TYPES, 0], &configs[I_SPLIT_FACTORS, 0],
                    &configs[I_SPLIT_FACTORS_2, 0], n_2, split_threshold)
@@ -891,8 +891,8 @@ cdef void _get_config(const double[::1] knots, const double[::1] quantiles, doub
 @cython.boundscheck(False)
 @cython.cdivision(True)
 def _get_configs(const double[:, ::1] knots, const double[:, ::1] quantiles,
-                 double[:, :, ::1] configs, int n_0, int n_2, double split_threshold=1e-2,
-                 double p_tail_limit=0.75):
+                 double[:, :, ::1] configs, int n_0, int n_2, double p_tail_limit,
+                 double split_threshold=1e-2):
     cdef size_t i
     for i in prange(n_0, nogil=True, schedule='static'):
-        _get_config(knots[i], quantiles[i], configs[i], n_2, split_threshold, p_tail_limit)
+        _get_config(knots[i], quantiles[i], configs[i], n_2, p_tail_limit, split_threshold)
