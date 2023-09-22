@@ -41,7 +41,7 @@ class QuantileLoss:
     device : str, optional
         The device on which you train the model. Set to ``'cpu'`` by default.
     """
-    def __init__(self, quantiles_pred, a0=0., device='cpu'):
+    def __init__(self, quantiles_pred, a0=4., device='cpu'):
         self.quantiles_pred = torch.as_tensor(quantiles_pred, dtype=torch.float).to(device)
         self.a0 = float(a0)
         self._weights = (torch.exp(self.a0 * torch.abs(self.quantiles_pred - 0.5))[None]).to(device)
@@ -653,10 +653,10 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
 # TODO: best epoch when reached max
 # TODO: first no drop_edge, then drop_edge
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
-             validation_fraction=0.15, train_loader=None, valid_loader=None, a0=0., a1=0., b1p=1.,
-             k1=2., rescale_data=False, target_loss_ratio=0., beta_reg=0.5, drop_edge=False,
-             lambda_max_factor=3., initial_max_ratio=0.1, initial_ratio_epochs=10, optimizer='Adam',
-             learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
+             validation_fraction=0.15, train_loader=None, valid_loader=None, a0=4., b1=0.5, c1=1.,
+             custom_l1=None, rescale_data=False, target_loss_ratio=0., beta_reg=0.5,
+             drop_edge=False, lambda_max_factor=3., initial_max_ratio=0.1, initial_ratio_epochs=10,
+             optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
              learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
              stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
              verbose=True):
@@ -769,7 +769,6 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
         loss = QuantileLoss(quantile_net_1d.quantiles_pred, a0, device=device)
         quantiles_c = np.concatenate([[0.], quantile_net_1d.quantiles_pred, [1.]])
         quantiles_c = torch.as_tensor(0.5 * (quantiles_c[:-1] + quantiles_c[1:]), dtype=torch.float)
-        w_a1 = (torch.exp(a1 * torch.abs(quantiles_c - 0.5))[None]).to(device)
 
         if isinstance(optimizer, type) and issubclass(optimizer, torch.optim.Optimizer):
             optimizer = optimizer(quantile_net_1d.parameters(), **optimizer_kwargs)
@@ -827,11 +826,15 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                     y_now = quantile_net_1d(x_now, None, return_raw=True)
                 l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
                 if target_loss_ratio_now > 0.:
-                    y_raw = torch.abs(w_a1 * y_now[1])
-                    if drop_edge:
-                        l1_now = torch.mean(y_raw[..., 1:-1]**k1)
+                    if custom_l1 is not None:
+                        l1_now = custom_l1(y_now[1])
                     else:
-                        l1_now = torch.mean(y_raw**k1)
+                        l1_now = torch.where(y_now[1] > c1, 2 * (y_now[1] - c1) + c1**2,
+                                             y_now[1]**2)
+                        l1_now *= torch.where(y_now[1] > 0., b1, 1.)
+                    if drop_edge:
+                        l1_now = l1_now[..., 1:-1]
+                    l1_now = torch.mean(l1_now)
                 else:
                     l1_now = torch.tensor(0.)
                 loss_now = l0_now + lambda_reg * l1_now
@@ -859,11 +862,15 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                         y_now = quantile_net_1d(x_now, None, return_raw=True)
                     l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
                     if target_loss_ratio_now > 0.:
-                        y_raw = torch.abs(w_a1 * y_now[1])
-                        if drop_edge:
-                            l1_now = torch.mean(y_raw[..., 1:-1]**k1)
+                        if custom_l1 is not None:
+                            l1_now = custom_l1(y_now[1])
                         else:
-                            l1_now = torch.mean(y_raw**k1)
+                            l1_now = torch.where(y_now[1] > c1, 2 * (y_now[1] - c1) + c1**2,
+                                                 y_now[1]**2)
+                            l1_now *= torch.where(y_now[1] > 0., b1, 1.)
+                        if drop_edge:
+                            l1_now = l1_now[..., 1:-1]
+                        l1_now = torch.mean(l1_now)
                     else:
                         l1_now = torch.tensor(0.)
                     loss_now = l0_now + lambda_reg * l1_now
