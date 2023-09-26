@@ -658,7 +658,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              drop_edge=False, lambda_max_factor=3., initial_max_ratio=0.1, initial_ratio_epochs=10,
              optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
              learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
-             stop_after_epochs=30, stop_tol=1e-4, max_epochs=300, return_best_epoch=True,
+             stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
              verbose=True):
     if isinstance(quantile_net_1d, _QuantileInterp1D): # for the first dim without x, no nn required
         if theta is not None:
@@ -752,17 +752,20 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             for batch_now in train_loader:
                 x_now, theta_now = _decode_batch(batch_now, device)
                 if x_now is not None:
-                    mu_x.append(torch.mean(x_now, dim=0))
-                    sigma_x.append(torch.std(x_now, dim=0))
+                    mu_x.append(torch.mean(x_now, dim=0, keepdim=True))
+                    sigma_x.append(torch.std(x_now, dim=0, keepdim=True))
                 if quantile_net_1d.i > 0:
-                    mu_theta.append(torch.mean(theta_now[..., :quantile_net_1d.i], dim=0))
-                    sigma_theta.append(torch.std(theta_now[..., :quantile_net_1d.i], dim=0))
+                    mu_theta.append(torch.mean(theta_now[..., :quantile_net_1d.i], dim=0,
+                                               keepdim=True))
+                    sigma_theta.append(torch.std(theta_now[..., :quantile_net_1d.i], dim=0,
+                                                 keepdim=True))
 
             mu_x = torch.mean(torch.concat(mu_x), dim=0) if len(mu_x) > 0 else None
-            sigma_x = torch.mean(torch.concat(sigma_x), dim=0) if len(sigma_x) > 0 else None
+            sigma_x = torch.mean(torch.concat(sigma_x)**2, dim=0)**0.5 if len(sigma_x) > 0 else None
             mu_theta = torch.mean(torch.concat(mu_theta), dim=0) if len(mu_theta) > 0 else None
-            sigma_theta = (torch.mean(torch.concat(sigma_theta), dim=0) if len(sigma_theta) > 0 else
-                           None)
+            sigma_theta = (torch.mean(torch.concat(sigma_theta)**2, dim=0)**0.5 if
+                           len(sigma_theta) > 0 else None)
+            # print(mu_x, sigma_x, mu_theta, sigma_theta)
             quantile_net_1d.set_rescaling(mu_x=mu_x, sigma_x=sigma_x, mu_theta=mu_theta,
                                           sigma_theta=sigma_theta)
 
