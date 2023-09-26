@@ -55,10 +55,11 @@ def c2st(
     clf = MLPClassifier(
         activation="relu",
         hidden_layer_sizes=(10 * ndim, 10 * ndim),
-        max_iter=1000,
+        max_iter=2000,
         solver="adam",
         random_state=seed,
-        early_stopping=True
+        early_stopping=True,
+        n_iter_no_change=20
     )
 
     data = np.concatenate((X, Y))

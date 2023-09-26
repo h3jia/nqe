@@ -260,7 +260,7 @@ class QuantileNet1D(MLP):
     See ``MLP`` for the additional parameters, some of which are required by the initializer.
     """
     def __init__(self, i, low, high, quantiles_pred=12, quantile_method='cumsum', binary_depth=0,
-                 p_tail_limit=0.7, split_threshold=1e-2, **kwargs):
+                 p_tail_limit=0.6, split_threshold=1e-2, **kwargs):
         self.quantiles_pred = _set_quantiles_pred(quantiles_pred)
         kwargs['output_neurons'] = self.quantiles_pred.size + 1
         super(QuantileNet1D, self).__init__(**kwargs)
@@ -484,7 +484,7 @@ class QuantileInterp1D(Interp1D):
         The threshold for splitting into two peaks to account for multimodality during the
         interpolation. Set to ``1e-2`` by default.
     """
-    def __init__(self, theta, low, high, quantiles_pred=12, p_tail_limit=0.7,
+    def __init__(self, theta, low, high, quantiles_pred=12, p_tail_limit=0.6,
                  split_threshold=1e-2):
         if isinstance(theta, torch.Tensor):
             theta = theta.detach().cpu().numpy()
@@ -540,7 +540,7 @@ class _QuantileInterp1D(QuantileInterp1D, nn.Module):
     """
     Placeholder for potentially-not-yet-fitted QuantileInterp1D.
     """
-    def __init__(self, low, high, quantiles_pred=12, p_tail_limit=0.7, split_threshold=1e-2):
+    def __init__(self, low, high, quantiles_pred=12, p_tail_limit=0.6, split_threshold=1e-2):
         self.i = 0
         self.low = low
         self.high = high
@@ -617,7 +617,7 @@ class QuantileNet(nn.ModuleList):
 
 
 def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_end=None,
-                     quantiles_pred=12, p_tail_limit=0.7, split_threshold=1e-2, activation='relu',
+                     quantiles_pred=12, p_tail_limit=0.6, split_threshold=1e-2, activation='relu',
                      batch_norm=False, shortcut=True, embedding_net=None):
     low = np.asarray(low)
     high = np.asarray(high)
@@ -658,7 +658,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              drop_edge=False, lambda_max_factor=3., initial_max_ratio=0.1, initial_ratio_epochs=10,
              optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
              learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
-             stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
+             stop_after_epochs=30, stop_tol=1e-4, max_epochs=300, return_best_epoch=True,
              verbose=True):
     if isinstance(quantile_net_1d, _QuantileInterp1D): # for the first dim without x, no nn required
         if theta is not None:
@@ -915,7 +915,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             i_best_cache = np.argmin(loss_valid_cache)
             state_dict = state_dict_cache[i_best_cache]
             quantile_net_1d.load_state_dict(state_dict)
-            i_epoch = i_epoch_all[i_best_cache]
+            i_epoch = i_epoch_cache[i_best_cache]
         else:
             state_dict = deepcopy(quantile_net_1d.state_dict())
         # state_dict={k: v.cpu() for k, v in state_dict.items()}

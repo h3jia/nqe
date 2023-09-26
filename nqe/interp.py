@@ -32,7 +32,7 @@ I_EXPAS_1 = 8
 N_CONFIG_INDICES = 9
 
 
-def get_configs(knots, quantiles, p_tail_limit=0.7, split_threshold=1e-2):
+def get_configs(knots, quantiles, p_tail_limit=0.6, split_threshold=1e-2):
     knots = np.atleast_2d(knots).astype(np.float64)
     quantiles = np.atleast_2d(quantiles).astype(np.float64)
     assert knots.shape[1] == quantiles.shape[1] >= 4
@@ -120,7 +120,7 @@ def sample(configs, n=1, random_seed=None, sobol=True, i=None, d=None):
 
 
 class Interp1D:
-    def __init__(self, knots=None, quantiles=None, p_tail_limit=0.7, split_threshold=1e-2,
+    def __init__(self, knots=None, quantiles=None, p_tail_limit=0.6, split_threshold=1e-2,
                  configs=None):
         if configs is not None:
             self.configs = _check_configs(configs)
