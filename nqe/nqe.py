@@ -648,10 +648,10 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
     return QuantileNet(module_list)
 
 
-# TODO: allow negative loss ratio
-# TODO: allow fixed lambda reg
-# TODO: best epoch when reached max
-# TODO: first no drop_edge, then drop_edge
+# TODO: allow negative loss ratio?
+# TODO: allow fixed lambda reg?
+# TODO: first no drop_edge, then drop_edge?
+# TODO: freeze the embedding network
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, a0=4., b1=0.5, c1=1.,
              custom_l1=None, rescale_data=False, target_loss_ratio=0., beta_reg=0.5,
@@ -660,7 +660,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
              stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
              verbose=True):
-    if isinstance(quantile_net_1d, _QuantileInterp1D):
+    if isinstance(quantile_net_1d, _QuantileInterp1D): # for the first dim without x, no nn required
         if theta is not None:
             theta = np.asarray(theta, dtype=np.float64)
             assert theta.ndim == 2
@@ -767,8 +767,9 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                                           sigma_theta=sigma_theta)
 
         loss = QuantileLoss(quantile_net_1d.quantiles_pred, a0, device=device)
-        quantiles_c = np.concatenate([[0.], quantile_net_1d.quantiles_pred, [1.]])
-        quantiles_c = torch.as_tensor(0.5 * (quantiles_c[:-1] + quantiles_c[1:]), dtype=torch.float)
+        # quantiles_c = np.concatenate([[0.], quantile_net_1d.quantiles_pred, [1.]])
+        # quantiles_c = torch.as_tensor(0.5 * (quantiles_c[:-1] + quantiles_c[1:]),
+        #                               dtype=torch.float)
 
         if isinstance(optimizer, type) and issubclass(optimizer, torch.optim.Optimizer):
             optimizer = optimizer(quantile_net_1d.parameters(), **optimizer_kwargs)
@@ -801,6 +802,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
         l1_train_all = []
         l0_valid_all = []
         l1_valid_all = []
+        i_epoch_all = []
         lambda_reg_all = []
         i_epoch = -1
         lambda_reg = 0.
@@ -809,6 +811,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
         while not _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_all, stop_after_epochs,
                                      stop_tol, max_epochs):
             i_epoch += 1
+            i_epoch_all.append(i_epoch)
             lambda_reg_all.append(lambda_reg)
             quantile_net_1d.train()
             l0_train = 0.
@@ -899,21 +902,28 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                     state_dict_cache = state_dict_cache[-(stop_after_epochs + 1):]
             scheduler.step()
             if verbose > 0 and (i_epoch + 1) % verbose == 0:
-                print(f'finished epoch {i_epoch + 1}, l0_valid = {l0_valid:.5f}, l1_valid = '
-                      f'{l1_valid:.5f}, lambda_reg = {lambda_reg:.5f}')
+                print(f'finished epoch {i_epoch + 1}, l0_train = {l0_train:.5f}, '
+                      f'l1_train = {l1_train:.5f}, l0_valid = {l0_valid:.5f}, '
+                      f'l1_valid = {l1_valid:.5f}, next lambda_reg = {lambda_reg:.5f}')
 
-        if return_best_epoch and i_epoch + 1 < max_epochs:
-            state_dict = state_dict_cache[0]
+        if return_best_epoch:
+            i_epoch_cache = i_epoch_all[-len(state_dict_cache):]
+            l0_valid_cache = l0_valid_all[-len(state_dict_cache):]
+            l1_valid_cache = l1_valid_all[-len(state_dict_cache):]
+            loss_valid_cache = (np.asarray(l0_valid_cache) +
+                                lambda_reg_all[-1] * np.asarray(l1_valid_cache))
+            i_best_cache = np.argmin(loss_valid_cache)
+            state_dict = state_dict_cache[i_best_cache]
             quantile_net_1d.load_state_dict(state_dict)
-            i_epoch -= stop_after_epochs
+            i_epoch = i_epoch_all[i_best_cache]
         else:
             state_dict = deepcopy(quantile_net_1d.state_dict())
         # state_dict={k: v.cpu() for k, v in state_dict.items()}
 
         if verbose > 0:
-            print(f'finished training dim {quantile_net_1d.i}, l0_valid_best = '
-                  f'{np.asarray(l0_valid_all)[i_epoch]:.5f}, l1_valid_best = '
-                  f'{np.asarray(l1_valid_all)[i_epoch]:.5f}')
+            print(f'finished training dim {quantile_net_1d.i}, '
+                  f'l0_valid_best = {np.asarray(l0_valid_all)[i_epoch]:.5f}, '
+                  f'l1_valid_best = {np.asarray(l1_valid_all)[i_epoch]:.5f}')
         return TrainResult(state_dict=state_dict, l0_train=np.asarray(l0_train_all),
                            l1_train=np.asarray(l1_train_all), l0_valid=np.asarray(l0_valid_all),
                            l1_valid=np.asarray(l1_valid_all), lambda_reg=np.asarray(lambda_reg_all),
