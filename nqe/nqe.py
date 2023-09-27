@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
-from typing import Type, Any, Callable, Union, List, Optional, Tuple
+from typing import Type, Any, Callable, Union, List, Optional, Tuple, Mapping
 from .interp import Interp1D
 from copy import deepcopy
 from collections import namedtuple
@@ -221,6 +221,15 @@ class MLP(nn.Module):
     forward = _forward
 
     __call__ = _forward
+
+    def load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True):
+        # TODO: temp fix, should figure out what's happening
+        # without this, it will only load the first dim of these buffer vars
+        super(MLP, self).load_state_dict(state_dict, strict)
+        self.mu_x = state_dict['mu_x']
+        self.sigma_x = state_dict['sigma_x']
+        self.mu_theta = state_dict['mu_theta']
+        self.sigma_theta = state_dict['sigma_theta']
 
 
 class QuantileNet1D(MLP):
