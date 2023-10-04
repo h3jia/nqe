@@ -119,6 +119,9 @@ def sample(configs, n=1, random_seed=None, sobol=True, i=None, d=None):
                                   'configs.shape[0] == n.')
 
 
+# def broaden(configs, broadening_factor=1.1):
+
+
 class Interp1D:
     def __init__(self, knots=None, quantiles=None, p_tail_limit=0.6, split_threshold=1e-2,
                  configs=None):

@@ -39,7 +39,7 @@ ctypedef struct cdf_params:
     double expa0
     double expa1
 
-cdef double XTOL = 1e-10, RTOL = 1e-10
+cdef double XTOL = 1e-8, RTOL = 1e-8, WIDTH_FACTOR = 1., NOT_WIDE_OFFSET = 1e8
 cdef int MITR = 300
 cdef int UNDEFINED = 0, NORMAL_CUBIC = 1, LEFT_END_CUBIC = 2, RIGHT_END_CUBIC = 3, LINEAR = 4
 cdef int DOUBLE_EXP = 5, LEFT_END_EXP = 6, RIGHT_END_EXP = 7 #, MERGE_EXP = 8
@@ -369,7 +369,7 @@ cdef double _get_split_factor(const double* knots, const double* quantiles, doub
     cdef double dydx1 = _get_dydx_1(h1, h0, m1, m0, p_tail_limit)
     cdef double dydx2 = _get_dydx_1(h3, h4, m3, m4, p_tail_limit)
     cdef double dydx3 = _get_dydx_2(h3, h4, m3, m4)
-    cdef double dpdx1, dpdx2, a1, a2, p1a, p2a
+    cdef double dpdx1, dpdx2, a1, a2, p1a, p2a, tmp
     if dydx1 > 0. and dydx2 > 0.: # should be always true for cdf interp here
         dpdx1 = _get_right_end_dpdx(h1, y0, y1, dydx0, dydx1)
         a1 = _solve_single_expa(h2, dydx1, dpdx1, 0.5 * (y2 - y1))
@@ -383,7 +383,10 @@ cdef double _get_split_factor(const double* knots, const double* quantiles, doub
             dpdx2 = -_solve_single_dpdx(h2, dydx2, -dpdx2, 0.5 * (y2 - y1))
         p1a = dydx2 * exp(a2 * h2 * h2 - dpdx2 / dydx2 * h2)
         p2a = dydx1 * exp(a1 * h2 * h2 + dpdx1 / dydx1 * h2)
-        return fmax(p1a / dydx1, p2a / dydx2)
+        tmp = fmax(p1a / dydx1, p2a / dydx2)
+        if m2 > fmin(m1, m3) * WIDTH_FACTOR:
+            tmp += NOT_WIDE_OFFSET
+        return tmp
     else:
         return inf
 
@@ -871,14 +874,15 @@ cdef void _get_config(const double[::1] knots, const double[::1] quantiles, doub
     configs[I_TYPES, 0] = LEFT_END_EXP
     configs[I_TYPES, n_2 - 2] = RIGHT_END_EXP
 
+    n_m = _get_n_m(configs, n_2)
     _get_split_factors(&configs[I_SPLIT_FACTORS, 2], &configs[I_KNOTS, 0], &configs[I_QUANTILES, 0],
-                       n_2 - 4, p_tail_limit, 1)
+                       n_m - 4, p_tail_limit, 1)
     _get_split_factors(&configs[I_SPLIT_FACTORS_2, 2], &configs[I_KNOTS, 0],
-                       &configs[I_QUANTILES, 0], n_2 - 5, p_tail_limit, 2)
+                       &configs[I_QUANTILES, 0], n_m - 5, p_tail_limit, 2)
 
     _get_exp_types(&configs[I_TYPES, 0], &configs[I_SPLIT_FACTORS, 0],
-                   &configs[I_SPLIT_FACTORS_2, 0], n_2, split_threshold)
-    n_m = _merge_exp_types(configs, n_2)
+                   &configs[I_SPLIT_FACTORS_2, 0], n_m, split_threshold)
+    n_m = _merge_exp_types(configs, n_m)
     _get_cubic_types(&configs[I_TYPES, 0], n_m)
     _get_dydxs(&configs[I_DYDXS, 0], &configs[I_KNOTS, 0], &configs[I_QUANTILES, 0],
                &configs[I_TYPES, 0], n_m - 1, p_tail_limit)

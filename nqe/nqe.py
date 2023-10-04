@@ -361,95 +361,71 @@ class QuantileNet1D(MLP):
         with torch.no_grad():
             self.to(device)
             self.eval()
-            if x is not None:
-                x = torch.as_tensor(x, dtype=torch.float)[None].to(device)
-            if theta is None:
-                if x is None:
-                    raise ValueError('x and theta cannot both be None.')
-                if batch_size is not None and n > batch_size:
-                    batch_size = int(batch_size)
-                    assert batch_size > 0
-                    return np.concatenate(
-                        [self.sample(n=min(batch_size, n - i * batch_size), x=x, theta=None,
-                                     random_seed=random_seed, sobol=sobol, batch_size=batch_size,
-                                     device=device) for i in range(int(np.ceil(n / batch_size)))]
-                    )
-                else:
-                    knots_pred = self(x, theta).detach().cpu().numpy()[0]
-                    return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed,
-                                                             sobol=sobol, i=i, d=d)
+            n, x, theta = _check_n_x_theta(n, x, theta)
+            if theta is None and x is None:
+                raise ValueError('x and theta cannot both be None.')
+            if batch_size is not None and n > batch_size >= 1:
+                batch_size = int(batch_size)
+                return np.concatenate(
+                    [self.sample(n=min(batch_size, n - i * batch_size),
+                                 x=(x if (x is None or x.shape[0] <= 1) else
+                                    x[(i * batch_size):((i + 1) * batch_size)]),
+                                 theta=(theta if (theta is None or theta.shape[0] <= 1) else
+                                        theta[(i * batch_size):((i + 1) * batch_size)]),
+                                 random_seed=random_seed, sobol=sobol, d=d, batch_size=batch_size,
+                                 device=device) for i in range(int(np.ceil(n / batch_size)))]
+                )
             else:
-                theta = torch.atleast_2d(torch.as_tensor(theta, dtype=torch.float)).to(device)
-                assert theta.ndim == 2
-                if not theta.shape[0] == n or theta.shape[0] == 1:
-                    raise NotImplementedError('currently only supports theta.shape[0] == n or '
-                                              'theta.shape[0] == 1.')
-                if batch_size is not None and n > batch_size:
-                    batch_size = int(batch_size)
-                    assert batch_size > 0
-                    return np.concatenate(
-                        [self.sample(n=min(batch_size, n - i * batch_size), x=x,
-                                     theta=(theta[(i * batch_size):((i + 1) * batch_size)]
-                                            if theta.shape[0] > 1 else theta),
-                                     random_seed=random_seed, sobol=sobol, batch_size=batch_size,
-                                     device=device) for i in range(int(np.ceil(n / batch_size)))]
-                    )
-                else:
-                    if x is not None:
-                        x = torch.tile(x, [theta.shape[0]] + list(np.ones(x.ndim - 1, dtype=int)))
-                    knots_pred = self(x, theta).detach().cpu().numpy()
-                    return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed,
-                                                             sobol=sobol, i=i, d=d)
+                n, x, theta = _broadcast_batch(n, x, theta)
+                if x is not None:
+                    x = x.contiguous().to(device)
+                if theta is not None:
+                    theta = theta.contiguous().to(device)
+                knots_pred = self(x, theta).detach().cpu().numpy()
+                return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed, sobol=sobol,
+                                                         i=i, d=d)
 
     def _f_interp(self, x, theta, batch_size, device, target, **kwargs):
         i = self.i
         with torch.no_grad():
             self.to(device)
             self.eval()
-            if x is not None:
-                x = torch.as_tensor(x, dtype=torch.float)[None].to(device)
+            _, x, theta = _check_n_x_theta(None, x, theta)
             if theta is None:
                 raise ValueError('theta cannot be None.')
+            if theta.shape[1] < i + 1:
+                raise ValueError('invalid shape for theta.')
+            max_x_theta = max(x.shape[0] if x is not None else -np.inf,
+                              theta.shape[0] if theta is not None else -np.inf)
+            if batch_size is not None and max_x_theta > batch_size >= 1:
+                batch_size = int(batch_size)
+                return np.concatenate(
+                    [self._f_interp(x=(x if (x is None or x.shape[0] <= 1) else
+                                       x[(i * batch_size):((i + 1) * batch_size)]),
+                                    theta=(theta if (theta is None or theta.shape[0] <= 1) else
+                                           theta[(i * batch_size):((i + 1) * batch_size)]),
+                                    batch_size=batch_size, device=device, target=target,
+                                    **kwargs)
+                     for i in range(int(np.ceil(theta.shape[0] / batch_size)))]
+                )
             else:
-                theta = torch.as_tensor(theta, dtype=torch.float).to(device)
-                if theta.ndim == 0:
-                    theta = theta[None, None]
-                elif theta.ndim == 1:
-                    warnings.warn('theta.ndim == 1 is ambiguous here and may lead to unexpected '
-                                  'behavior, please consider giving me a 2-dim Tensor.',
-                                  RuntimeWarning)
-                    theta = theta[None]
-                elif theta.ndim == 2:
-                    pass
+                _, x, theta = _broadcast_batch(None, x, theta)
+                if x is not None:
+                    x = x.contiguous().to(device)
+                if i > 0:
+                    theta_prev = theta[:, :i].contiguous().to(device)
+                elif i == 0:
+                    theta_prev = None
                 else:
-                    raise ValueError('theta should be a 2-dim Tensor.')
-                assert theta.shape[1] >= i + 1
-                if batch_size is not None and theta.shape[0] > batch_size:
-                    batch_size = int(batch_size)
-                    assert batch_size > 0
-                    return np.concatenate(
-                        [self._f_interp(x=x, theta=theta[(i * batch_size):((i + 1) * batch_size)],
-                                        batch_size=batch_size, device=device, target=target,
-                                        **kwargs)
-                         for i in range(int(np.ceil(theta.shape[0] / batch_size)))]
-                    )
+                    raise RuntimeError('invalid value for i.')
+                theta_now = theta[:, i].detach().cpu().numpy().astype(np.float64)
+                knots_pred = self(x, theta_prev).detach().cpu().numpy().astype(np.float64)
+                if target == 'pdf':
+                    return self.interp_1d(knots_pred).pdf(x=theta_now)
+                elif target == 'cdf':
+                    return self.interp_1d(knots_pred).cdf(x=theta_now, **kwargs)
                 else:
-                    if x is not None:
-                        x = torch.tile(x, [theta.shape[0]] + list(np.ones(x.ndim - 1, dtype=int)))
-                    if i > 0:
-                        theta_prev = theta[:, :i].contiguous()
-                    elif i == 0:
-                        theta_prev = None
-                    else:
-                        raise RuntimeError('invalid value for i.')
-                    theta_now = theta[:, i].detach().cpu().numpy().astype(np.float64)
-                    knots_pred = self(x, theta_prev).detach().cpu().numpy()
-                    if target == 'pdf':
-                        return self.interp_1d(knots_pred).pdf(x=theta_now)
-                    elif target == 'cdf':
-                        return self.interp_1d(knots_pred).cdf(x=theta_now, **kwargs)
-                    else:
-                        raise ValueError('invalid value for target.')
+                    raise ValueError('invalid value for target.')
 
     def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
         return self._f_interp(x=x, theta=theta, batch_size=batch_size, device=device, target='pdf')
@@ -465,6 +441,72 @@ class QuantileNet1D(MLP):
             return chi2.cdf(norm.ppf(q)**2, df=1)
         else:
             raise NotImplementedError('currently only normal is supported for ref_dist.')
+
+
+def _check_n_x_theta(n, x, theta):
+    if theta is not None:
+        theta = torch.as_tensor(theta, dtype=torch.float)
+        if theta.ndim == 0:
+            theta = theta[None, None]
+        elif theta.ndim == 1:
+            warnings.warn('theta.ndim == 1 is ambiguous here and may lead to unexpected behavior, '
+                          'please consider giving me a 2-dim Tensor.', RuntimeWarning)
+            theta = theta[None]
+        elif theta.ndim == 2:
+            pass
+        else:
+            raise ValueError('theta should be a 2-dim Tensor.')
+    if x is not None:
+        x = torch.as_tensor(x, dtype=torch.float)
+
+    if n is None:
+        if x is not None and theta is not None:
+            if ((x.shape[0] not in (1, theta.shape[0])) and
+                (theta.shape[0] not in (1, x.shape[0]))):
+                warnings.warn('the shapes of x and theta seem inconsistent, assuming they all '
+                              'share the same x.', RuntimeWarning)
+                x = x[None]
+    else:
+        n = int(n)
+        if theta is not None:
+            if theta.shape[0] not in (1, n):
+                raise ValueError('the shape of theta is inconsistent with n.')
+        if x is not None:
+            if x.shape[0] not in (1, n):
+                warnings.warn('the shape of x is inconsistent with n, assuming they all share the '
+                              'same x.', RuntimeWarning)
+                x = x[None]
+
+    return n, x, theta
+
+
+def _broadcast_batch(n, x, theta):
+    if x is not None and theta is not None:
+        if n is None:
+            if x.shape[0] == theta.shape[0]:
+                pass
+            elif x.shape[0] == 1 and theta.shape[0] > 1:
+                x = torch.tile(x, [theta.shape[0]] + list(np.ones(x.ndim - 1, dtype=int)))
+            elif theta.shape[0] == 1 and x.shape[0] > 1:
+                theta = torch.tile(theta, [x.shape[0]] + list(np.ones(theta.ndim - 1, dtype=int)))
+            else:
+                raise ValueError('the shapes of x and theta do not match.')
+        else:
+            if x.shape[0] == n:
+                pass
+            elif x.shape[0] == 1:
+                if theta.shape[0] == n:
+                    x = torch.tile(x, [n] + list(np.ones(x.ndim - 1, dtype=int)))
+            else:
+                raise ValueError('invalid shape for x.')
+            if theta.shape[0] == n:
+                pass
+            elif theta.shape[0] == 1:
+                if x.shape[0] == n:
+                    theta = torch.tile(theta, [n] + list(np.ones(theta.ndim - 1, dtype=int)))
+            else:
+                raise ValueError('invalid shape for theta.')
+    return n, x, theta
 
 
 class QuantileInterp1D(Interp1D):
@@ -588,15 +630,19 @@ class QuantileNet(nn.ModuleList):
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, batch_size=None,
                device='cpu'):
+        # theta is not used
+        n, x, _ = _check_n_x_theta(n, x, None)
         random_seed = np.random.default_rng(random_seed)
         if not self.check():
             raise RuntimeError('This QuantileNet is not well defined.')
         with torch.no_grad():
-            if batch_size is not None and n > batch_size:
+            if batch_size is not None and n > batch_size >= 1:
                 batch_size = int(batch_size)
-                assert batch_size > 0
                 return np.concatenate(
-                    [self.sample(n=min(batch_size, n - i * batch_size), x=x, theta=None,
+                    [self.sample(n=min(batch_size, n - i * batch_size),
+                                 x=(x if (x is None or x.shape[0] <= 1) else
+                                    x[(i * batch_size):((i + 1) * batch_size)]),
+                                 theta=None,
                                  random_seed=random_seed, sobol=sobol, batch_size=batch_size,
                                  device=device) for i in range(int(np.ceil(n / batch_size)))]
                 )

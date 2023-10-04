@@ -9,8 +9,7 @@ __all__ = ['c2st', 'c2st_auc']
 # based on https://github.com/sbi-benchmark/sbibm/blob/5cfd0b36e7813e48464c5f4ba3e0767261e043c7/sbibm/metrics/c2st.py
 # the only difference is that we set max_iter = 2000 (instead of 10000), early_stopping = True,
 #                                    n_iter_no_change = 20,
-# which makes it faster by up to 1-2 orders of magnitude for certain applications,
-# while the results are almost identical
+# which makes it faster with almost identical results except for the BGLMR example
 
 
 def c2st(
