@@ -13,7 +13,7 @@ cdef extern from "numpy/npy_math.h":
 
 
 __all__ = ['_get_configs', '_pdf_1_n', '_pdf_n_n', '_cdf_1_n', '_cdf_n_n', '_ppf_1_n', '_ppf_n_n',
-           '_cdf_1_n_local', '_cdf_n_n_local']
+           '_cdf_1_n_local', '_cdf_n_n_local', '_broaden']
 
 
 ctypedef struct int_p_dx_params_expa:
@@ -40,6 +40,7 @@ ctypedef struct cdf_params:
     double expa1
 
 cdef double XTOL = 1e-8, RTOL = 1e-8, WIDTH_FACTOR = 1., NOT_WIDE_OFFSET = 1e8
+cdef double EPS_DPDX_EXPA = 1e-8
 cdef int MITR = 300
 cdef int UNDEFINED = 0, NORMAL_CUBIC = 1, LEFT_END_CUBIC = 2, RIGHT_END_CUBIC = 3, LINEAR = 4
 cdef int DOUBLE_EXP = 5, LEFT_END_EXP = 6, RIGHT_END_EXP = 7 #, MERGE_EXP = 8
@@ -370,15 +371,25 @@ cdef double _get_split_factor(const double* knots, const double* quantiles, doub
     cdef double dydx2 = _get_dydx_1(h3, h4, m3, m4, p_tail_limit)
     cdef double dydx3 = _get_dydx_2(h3, h4, m3, m4)
     cdef double dpdx1, dpdx2, a1, a2, p1a, p2a, tmp
+    cdef double dlogpdx0, dlogpdx1
     if dydx1 > 0. and dydx2 > 0.: # should be always true for cdf interp here
         dpdx1 = _get_right_end_dpdx(h1, y0, y1, dydx0, dydx1)
         a1 = _solve_single_expa(h2, dydx1, dpdx1, 0.5 * (y2 - y1))
-        if dpdx1 * a1 < 0.:
+        dlogpdx0 = dpdx1 / dydx1
+        dlogpdx1 = dpdx1 / dydx1 + 2 * a1 * h2
+        # if dpdx1 * a1 < 0.:
+        if (dlogpdx0 * dlogpdx1 < 0. and
+            fmin(fabs(dlogpdx0 / dlogpdx1), fabs(dlogpdx1 / dlogpdx0)) > EPS_DPDX_EXPA):
             a1 = 0.
             dpdx1 = _solve_single_dpdx(h2, dydx1, dpdx1, 0.5 * (y2 - y1))
+
         dpdx2 = _get_left_end_dpdx(h3, y2, y3, dydx2, dydx3)
         a2 = _solve_single_expa(h2, dydx2, -dpdx2, 0.5 * (y2 - y1))
-        if dpdx2 * a2 > 0.:
+        dlogpdx0 = dpdx2 / dydx2
+        dlogpdx1 = dpdx2 / dydx2 - 2 * a2 * h2
+        # if dpdx2 * a2 < 0.:
+        if (dlogpdx0 * dlogpdx1 < 0. and
+            fmin(fabs(dlogpdx0 / dlogpdx1), fabs(dlogpdx1 / dlogpdx0)) > EPS_DPDX_EXPA):
             a2 = 0.
             dpdx2 = -_solve_single_dpdx(h2, dydx2, -dpdx2, 0.5 * (y2 - y1))
         p1a = dydx2 * exp(a2 * h2 * h2 - dpdx2 / dydx2 * h2)
@@ -405,8 +416,9 @@ cdef void _get_exp_types(double* types, const double* split_factors, const doubl
         if split_factors_2[i] < fmin(split_threshold,
                                      fmin(fmin(split_factors_2[i - 2], split_factors_2[i - 1]),
                                           fmin(split_factors_2[i + 1], split_factors_2[i + 2]))):
-            types[i] = DOUBLE_EXP
-            types[i + 1] = DOUBLE_EXP
+            if iround(types[i]) != DOUBLE_EXP and iround(types[i + 1]) != DOUBLE_EXP:
+                types[i] = DOUBLE_EXP
+                types[i + 1] = DOUBLE_EXP
 
 
 @cython.wraparound(False)
@@ -420,24 +432,14 @@ cdef int _merge_exp_types(double[:, ::1] configs, int n_2) nogil:
             while i + j + 1 <= n_2 - 4 and iround(configs[I_TYPES, i + j + 1]) == DOUBLE_EXP:
                 j += 1
             if j > 0:
-                _remove_merged(configs, i, j, n_2)
-    return _get_n_m(configs, n_2)
+                _remove_merged_exp(configs, i, j, n_2)
+    return _get_n_m(configs[I_KNOTS], n_2)
 
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef int _get_n_m(const double[:, ::1] configs, int n_2) nogil:
-    cdef size_t i
-    for i in range(n_2 - 1, -1, -1):
-        if not isnan(configs[I_KNOTS, i]):
-            return i + 1
-
-
-@cython.wraparound(False)
-@cython.boundscheck(False)
-@cython.cdivision(True)
-cdef void _remove_merged(double[:, ::1] configs, int i, int j, int n_2) nogil:
+cdef void _remove_merged_exp(double[:, ::1] configs, int i, int j, int n_2) nogil:
     cdef size_t k, l
     cdef size_t[3] k_all = [I_KNOTS, I_QUANTILES, I_TYPES]
     for k in k_all:
@@ -445,6 +447,16 @@ cdef void _remove_merged(double[:, ::1] configs, int i, int j, int n_2) nogil:
             configs[k, l] = configs[k, l + j]
         for l in range(n_2 - j, n_2):
             configs[k, l] = nan
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef int _get_n_m(const double[::1] array, int n_2) nogil:
+    cdef size_t i
+    for i in range(n_2 - 1, -1, -1):
+        if not isnan(array[i]):
+            return i + 1
 
 
 @cython.wraparound(False)
@@ -505,6 +517,7 @@ cdef void _get_exps(double* expas_0, double* expas_1, double* dpdxs, const doubl
                     const double* quantiles, const double* dydxs, const double* types,
                     int n_interval) nogil:
     cdef size_t i
+    cdef double dlogpdx0, dlogpdx1
     # for i in prange(i_start, i_end, nogil=True, schedule='static'):
     for i in range(n_interval):
         if iround(types[i]) == DOUBLE_EXP or iround(types[i]) == RIGHT_END_EXP:
@@ -514,7 +527,11 @@ cdef void _get_exps(double* expas_0, double* expas_1, double* dpdxs, const doubl
                 knots[i + 1] - knots[i], dydxs[i], dpdxs[i],
                 (0.5 if iround(types[i]) == DOUBLE_EXP else 1.) * (quantiles[i + 1] - quantiles[i])
             )
-            if dpdxs[i] * expas_0[i] < 0.:
+            dlogpdx0 = dpdxs[i] / dydxs[i]
+            dlogpdx1 = dpdxs[i] / dydxs[i] + 2 * expas_0[i] * (knots[i + 1] - knots[i])
+            # if dpdxs[i] * expas_0[i] < 0.:
+            if (dlogpdx0 * dlogpdx1 < 0. and
+                fmin(fabs(dlogpdx0 / dlogpdx1), fabs(dlogpdx1 / dlogpdx0)) > EPS_DPDX_EXPA):
                 expas_0[i] = 0.
                 dpdxs[i] = _solve_single_dpdx(
                     knots[i + 1] - knots[i], dydxs[i], dpdxs[i],
@@ -528,7 +545,11 @@ cdef void _get_exps(double* expas_0, double* expas_1, double* dpdxs, const doubl
                 knots[i + 1] - knots[i], dydxs[i + 1], -dpdxs[i + 1],
                 (0.5 if iround(types[i]) == DOUBLE_EXP else 1.) * (quantiles[i + 1] - quantiles[i])
             )
-            if dpdxs[i + 1] * expas_1[i] > 0.:
+            dlogpdx0 = dpdxs[i + 1] / dydxs[i + 1]
+            dlogpdx1 = dpdxs[i + 1] / dydxs[i + 1] - 2 * expas_1[i] * (knots[i + 1] - knots[i])
+            # if dpdxs[i + 1] * expas_1[i] > 0.:
+            if (dlogpdx0 * dlogpdx1 < 0. and
+                fmin(fabs(dlogpdx0 / dlogpdx1), fabs(dlogpdx1 / dlogpdx0)) > EPS_DPDX_EXPA):
                 expas_1[i] = 0.
                 dpdxs[i + 1] = -_solve_single_dpdx(
                     knots[i + 1] - knots[i], dydxs[i + 1], -dpdxs[i + 1],
@@ -541,10 +562,12 @@ cdef void _get_exps(double* expas_0, double* expas_1, double* dpdxs, const doubl
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef double _get_pdf(double x, const double[:, ::1] configs, int n_2) nogil:
-    cdef int n_m = _get_n_m(configs, n_2)
+    cdef int n_m = _get_n_m(configs[I_KNOTS], n_2)
     cdef double h, t, y
     cdef int j = _find_interval(&configs[I_KNOTS, 0], n_m, x) - 1
     cdef int t_j = iround(configs[I_TYPES, j])
+    if x == configs[I_KNOTS, n_m - 1]:
+        j = n_m - 2
     if j >= 0 and j <= n_m - 2:
         if t_j in (NORMAL_CUBIC, LEFT_END_CUBIC, RIGHT_END_CUBIC, LINEAR):
             h = configs[I_KNOTS, j + 1] - configs[I_KNOTS, j]
@@ -678,7 +701,7 @@ cdef double _cdf_right_exp_args(double t, void *args) noexcept nogil:
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef double _get_cdf(double x, const double[:, ::1] configs, int n_2) nogil:
-    cdef int n_m = _get_n_m(configs, n_2)
+    cdef int n_m = _get_n_m(configs[I_KNOTS], n_2)
     cdef double y
     cdef int j = _find_interval(&configs[I_KNOTS, 0], n_m, x) - 1
     cdef int t_j = iround(configs[I_TYPES, j])
@@ -742,7 +765,7 @@ def _cdf_n_n(const double[:, :, ::1] configs, const double[::1] xs, double[::1] 
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef double _get_cdf_local(double y, const double[:, ::1] configs, int n_2) nogil:
-    cdef int n_m = _get_n_m(configs, n_2)
+    cdef int n_m = _get_n_m(configs[I_KNOTS], n_2)
     cdef int j = _find_interval(&configs[I_QUANTILES, 0], n_m, y) - 1, dj
     cdef double y0 = nan, y1 = nan
     if y == 0.:
@@ -791,7 +814,7 @@ def _cdf_n_n_local(const double[:, :, ::1] configs, double[::1] ys, int n_point,
 @cython.boundscheck(False)
 @cython.cdivision(True)
 cdef double _get_ppf(double y, const double[:, ::1] configs, int n_2) nogil:
-    cdef int n_m = _get_n_m(configs, n_2)
+    cdef int n_m = _get_n_m(configs[I_KNOTS], n_2)
     cdef double x
     cdef int j = _find_interval(&configs[I_QUANTILES, 0], n_m, y) - 1
     cdef int t_j = iround(configs[I_TYPES, j])
@@ -858,37 +881,61 @@ def _ppf_n_n(const double[:, :, ::1] configs, double[::1] xs, const double[::1] 
 cdef void _get_config(const double[::1] knots, const double[::1] quantiles, double[:, ::1] configs,
                       int n_2, double p_tail_limit, double split_threshold=1e-2) nogil:
     cdef size_t i
-    cdef int n_m
-    cdef size_t[4] i_all = [0, 1, n_2 - 3, n_2 - 2]
-    cdef size_t[4] i_all_2 = [0, 1, n_2 - 4, n_2 - 3]
+    cdef int n_m = _get_n_m(knots, n_2)
+    cdef size_t[4] i_all = [0, 1, n_m - 3, n_m - 2]
+    cdef size_t[4] i_all_2 = [0, 1, n_m - 4, n_m - 3]
+    cdef double h0, h1, m0, m1
     configs[I_KNOTS] = knots
     configs[I_QUANTILES] = quantiles
     configs[I_QUANTILES, 0] = 0.
-    configs[I_QUANTILES, n_2 - 1] = 1.
-    for i in i_all:
-        configs[I_SPLIT_FACTORS, i] = inf
-    for i in i_all_2:
-        configs[I_SPLIT_FACTORS_2, i] = inf
-    for i in range(n_2 - 1):
-        configs[I_TYPES, i] = UNDEFINED
-    configs[I_TYPES, 0] = LEFT_END_EXP
-    configs[I_TYPES, n_2 - 2] = RIGHT_END_EXP
+    configs[I_QUANTILES, n_m - 1] = 1.
 
-    n_m = _get_n_m(configs, n_2)
-    _get_split_factors(&configs[I_SPLIT_FACTORS, 2], &configs[I_KNOTS, 0], &configs[I_QUANTILES, 0],
-                       n_m - 4, p_tail_limit, 1)
-    _get_split_factors(&configs[I_SPLIT_FACTORS_2, 2], &configs[I_KNOTS, 0],
-                       &configs[I_QUANTILES, 0], n_m - 5, p_tail_limit, 2)
+    if n_m == 2:
+        configs[I_TYPES, 0] = LINEAR
+        configs[I_DYDXS, 0] = (quantiles[1] - quantiles[0]) / (knots[1] - knots[0])
+        configs[I_DYDXS, 1] = configs[I_DYDXS, 0]
 
-    _get_exp_types(&configs[I_TYPES, 0], &configs[I_SPLIT_FACTORS, 0],
-                   &configs[I_SPLIT_FACTORS_2, 0], n_m, split_threshold)
-    n_m = _merge_exp_types(configs, n_m)
-    _get_cubic_types(&configs[I_TYPES, 0], n_m)
-    _get_dydxs(&configs[I_DYDXS, 0], &configs[I_KNOTS, 0], &configs[I_QUANTILES, 0],
-               &configs[I_TYPES, 0], n_m - 1, p_tail_limit)
-    _get_exps(&configs[I_EXPAS_0, 0], &configs[I_EXPAS_1, 0], &configs[I_DPDXS, 0],
-              &configs[I_KNOTS, 0], &configs[I_QUANTILES, 0], &configs[I_DYDXS, 0],
-              &configs[I_TYPES, 0], n_m - 1)
+    elif n_m == 3:
+        configs[I_TYPES, 0] = LEFT_END_CUBIC
+        configs[I_TYPES, 1] = RIGHT_END_CUBIC
+        h0 = knots[1] - knots[0]
+        h1 = knots[2] - knots[1]
+        m0 = (quantiles[1] - quantiles[0]) / h0
+        m1 = (quantiles[2] - quantiles[1]) / h1
+        configs[I_DYDXS, 0] = m0
+        configs[I_DYDXS, 1] = _get_dydx_2(h0, h1, m0, m1)
+        configs[I_DYDXS, 2] = m1
+
+    elif n_m >= 4:
+        configs[I_TYPES, 0] = LEFT_END_EXP
+        configs[I_TYPES, n_m - 2] = RIGHT_END_EXP
+
+        if n_m >= 5:
+            for i in i_all:
+                configs[I_SPLIT_FACTORS, i] = inf
+            for i in i_all_2:
+                configs[I_SPLIT_FACTORS_2, i] = inf
+            for i in range(n_m - 1):
+                configs[I_TYPES, i] = UNDEFINED
+
+            _get_split_factors(&configs[I_SPLIT_FACTORS, 2], &configs[I_KNOTS, 0],
+                               &configs[I_QUANTILES, 0], n_m - 4, p_tail_limit, 1)
+            _get_split_factors(&configs[I_SPLIT_FACTORS_2, 2], &configs[I_KNOTS, 0],
+                               &configs[I_QUANTILES, 0], n_m - 5, p_tail_limit, 2)
+
+            _get_exp_types(&configs[I_TYPES, 0], &configs[I_SPLIT_FACTORS, 0],
+                           &configs[I_SPLIT_FACTORS_2, 0], n_m, split_threshold)
+            n_m = _merge_exp_types(configs, n_m)
+            _get_cubic_types(&configs[I_TYPES, 0], n_m)
+
+        else:
+            configs[I_TYPES, 1] = LINEAR
+
+        _get_dydxs(&configs[I_DYDXS, 0], &configs[I_KNOTS, 0], &configs[I_QUANTILES, 0],
+                   &configs[I_TYPES, 0], n_m - 1, p_tail_limit)
+        _get_exps(&configs[I_EXPAS_0, 0], &configs[I_EXPAS_1, 0], &configs[I_DPDXS, 0],
+                  &configs[I_KNOTS, 0], &configs[I_QUANTILES, 0], &configs[I_DYDXS, 0],
+                  &configs[I_TYPES, 0], n_m - 1)
 
 
 @cython.wraparound(False)
@@ -900,3 +947,134 @@ def _get_configs(const double[:, ::1] knots, const double[:, ::1] quantiles,
     cdef size_t i
     for i in prange(n_0, nogil=True, schedule='static'):
         _get_config(knots[i], quantiles[i], configs[i], n_2, p_tail_limit, split_threshold)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef void _broaden_interval(const double[::1] config_knots, const double[::1] config_quantiles,
+                            double[::1] cache_knots, double[::1] cache_quantiles,
+                            double[::1] cache_flags, int i0, int i1, int left_double,
+                            int right_double, double broadening_factor) nogil:
+    cdef double x0, y0, x1, y1, xc, yc
+    cdef double left_removed = 0., right_removed = 0., left_mass = 0., right_mass = 0.
+    cdef int ic
+    cdef size_t i
+    if left_double:
+        x0 = 0.5 * (config_knots[i0] + config_knots[i0 + 1])
+        y0 = 0.5 * (config_quantiles[i0] + config_quantiles[i0 + 1])
+    else:
+        x0 = config_knots[i0]
+        y0 = config_quantiles[i0]
+    if right_double:
+        x1 = 0.5 * (config_knots[i1] + config_knots[i1 + 1])
+        y1 = 0.5 * (config_quantiles[i1] + config_quantiles[i1 + 1])
+    else:
+        x1 = config_knots[i1 + 1]
+        y1 = config_quantiles[i1 + 1]
+    yc = 0.5 * (y0 + y1)
+    ic = _find_interval(&config_quantiles[i0], i1 - i0 + 2, yc) - 1 + i0
+    xc = config_knots[ic] + ((yc - config_quantiles[ic]) /
+                             (config_quantiles[ic + 1] - config_quantiles[ic]) *
+                             (config_knots[ic + 1] - config_knots[ic]))
+    left_mass = yc - y0
+    right_mass = y1 - yc
+    if not left_double:
+        cache_knots[i0] = config_knots[i0]
+        cache_quantiles[i0] = config_quantiles[i0]
+        cache_flags[i0] = 0
+    if not right_double:
+        cache_knots[i1 + 1] = config_knots[i1 + 1]
+        cache_quantiles[i1 + 1] = config_quantiles[i1 + 1]
+        cache_flags[i1 + 1] = 0
+    for i in range(i0 + 1, i1 + 1):
+        cache_knots[i] = xc + broadening_factor * (config_knots[i] - xc)
+        cache_quantiles[i] = config_quantiles[i]
+        cache_flags[i] = 0
+    for i in range(i0 + 1, i1 + 1):
+        if cache_knots[i] >= xc:
+            break
+        elif (
+            cache_knots[i] <= x0 or
+            (config_quantiles[i0 + 1] - y0) / (cache_knots[i] - x0) >
+            (cache_quantiles[i + 1] - cache_quantiles[i]) / (cache_knots[i + 1] - cache_knots[i])
+        ):
+            cache_flags[i] = 1
+            left_removed = config_quantiles[i + 1] - config_quantiles[i0 + 1]
+        else:
+            break
+    for i in range(i1, i0, -1):
+        if cache_knots[i] <= xc:
+            break
+        elif (
+            cache_knots[i] >= x1 or
+            (y1 - config_quantiles[i1]) / (x1 - cache_knots[i]) >
+            (cache_quantiles[i] - cache_quantiles[i - 1]) / (cache_knots[i] - cache_knots[i - 1])
+        ):
+            cache_flags[i] = 1
+            right_removed = config_quantiles[i1] - config_quantiles[i - 1]
+        else:
+            break
+    for i in range(i0 + 1, i1 + 1):
+        if not cache_flags[i]:
+            if cache_knots[i] < xc:
+                cache_quantiles[i] = (yc - left_mass / (left_mass - left_removed) *
+                                      (yc - config_quantiles[i]))
+            elif cache_knots[i] > xc:
+                cache_quantiles[i] = (yc + right_mass / (right_mass - right_removed) *
+                                      (config_quantiles[i] - yc))
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef void _remove_broaden_flagged(double[:, ::1] broaden_cache, int i, int n_m) nogil:
+    cdef size_t j, k
+    for j in range(i, n_m - 1):
+        for k in range(3):
+            broaden_cache[k, j] = broaden_cache[k, j + 1]
+    for k in range(3):
+        broaden_cache[k, n_m - 1] = nan
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+cdef void _broaden_config(const double[:, ::1] configs, int n_2, double[:, ::1] broaden_cache,
+                          double broadening_factor) nogil:
+    cdef size_t i, i0 = 0, i1
+    cdef int n_m = _get_n_m(configs[I_KNOTS], n_2), left_double = 0, right_double = 0
+    if n_m == 2:
+        broaden_cache[:2, :2] = configs[:2, :2]
+        broaden_cache[2, 0] = 0
+        broaden_cache[2, 1] = 0
+    elif n_m >= 3:
+        for i in range(n_m - 1):
+            if iround(configs[I_TYPES, i]) == DOUBLE_EXP:
+                i1 = i
+                right_double = 1
+                _broaden_interval(configs[I_KNOTS], configs[I_QUANTILES], broaden_cache[0],
+                                  broaden_cache[1], broaden_cache[2], i0, i1, left_double,
+                                  right_double, broadening_factor)
+                i0 = i
+                left_double = 1
+            elif iround(configs[I_TYPES, i]) == RIGHT_END_EXP or i == n_m - 2:
+                i1 = i
+                right_double = 0
+                _broaden_interval(configs[I_KNOTS], configs[I_QUANTILES], broaden_cache[0],
+                                  broaden_cache[1], broaden_cache[2], i0, i1, left_double,
+                                  right_double, broadening_factor)
+                break
+    for i in range(n_m):
+        while broaden_cache[2, i] > 0:
+            _remove_broaden_flagged(broaden_cache, i, n_m)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
+def _broaden_configs(const double[:, :, ::1] configs, int n_0, int n_2,
+                     double[:, :, ::1] broaden_cache, double broadening_factor):
+    cdef size_t i
+    for i in prange(n_0, nogil=True, schedule='static'):
+        _broaden_config(configs[i], n_2, broaden_cache[i], broadening_factor)

@@ -1,10 +1,10 @@
 import numpy as np
 import scipy
 from ._interp import _get_configs, _pdf_1_n, _pdf_n_n, _cdf_1_n, _cdf_n_n, _ppf_1_n, _ppf_n_n
-from ._interp import _cdf_1_n_local, _cdf_n_n_local
+from ._interp import _cdf_1_n_local, _cdf_n_n_local, _broaden_configs
 
 
-__all__ = ['get_configs', 'pdf', 'cdf', 'ppf', 'sample', 'Interp1D']
+__all__ = ['get_configs', 'pdf', 'cdf', 'ppf', 'sample', 'broaden', 'Interp1D']
 
 
 # type table
@@ -33,9 +33,11 @@ N_CONFIG_INDICES = 9
 
 
 def get_configs(knots, quantiles, p_tail_limit=0.6, split_threshold=1e-2):
-    knots = np.atleast_2d(knots).astype(np.float64)
-    quantiles = np.atleast_2d(quantiles).astype(np.float64)
-    assert knots.shape[1] == quantiles.shape[1] >= 4
+    knots = np.ascontiguousarray(np.atleast_2d(knots), dtype=np.float64)
+    quantiles = np.ascontiguousarray(np.atleast_2d(quantiles), dtype=np.float64)
+    # assert knots.shape[1] == quantiles.shape[1] >= 4
+    assert (np.min(np.sum(np.isfinite(knots), axis=1)) ==
+            np.min(np.sum(np.isfinite(quantiles), axis=1)) >= 2)
     assert knots.ndim == quantiles.ndim == 2
     if knots.shape[0] == quantiles.shape[0]:
         pass
@@ -52,7 +54,7 @@ def get_configs(knots, quantiles, p_tail_limit=0.6, split_threshold=1e-2):
 
 
 def _check_configs(configs):
-    configs = np.asarray(configs, dtype=np.float64)
+    configs = np.ascontiguousarray(configs, dtype=np.float64)
     if configs.ndim == 2:
         configs = configs[np.newaxis]
     assert configs.ndim == 3 and configs.shape[1] == N_CONFIG_INDICES
@@ -119,7 +121,11 @@ def sample(configs, n=1, random_seed=None, sobol=True, i=None, d=None):
                                   'configs.shape[0] == n.')
 
 
-# def broaden(configs, broadening_factor=1.1):
+def broaden(configs, broadening_factor=1.1, p_tail_limit=0.6, split_threshold=1e-2):
+    broaden_cache = np.full((configs.shape[0], 3, configs.shape[2]), np.nan, dtype=np.float64)
+    _broaden_configs(configs, configs.shape[0], configs.shape[2], broaden_cache, broadening_factor)
+    return get_configs(knots=broaden_cache[:, 0, :], quantiles=broaden_cache[:, 1, :],
+                       p_tail_limit=p_tail_limit, split_threshold=split_threshold)
 
 
 class Interp1D:
@@ -154,3 +160,7 @@ class Interp1D:
             return sample(self.configs, n, random_seed, sobol, i, d)
         else:
             raise RuntimeError('this Interp1D has not been fitted.')
+
+    def broaden(self, broadening_factor=1.1, p_tail_limit=0.6, split_threshold=1e-2):
+        return Interp1D(configs=broaden(self.configs, broadening_factor, p_tail_limit,
+                                        split_threshold))

@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from typing import Type, Any, Callable, Union, List, Optional, Tuple, Mapping
-from .interp import Interp1D
+from .interp import Interp1D, broaden
 from copy import deepcopy
 from collections import namedtuple
 from scipy.stats import norm, chi2
@@ -536,18 +536,21 @@ class QuantileInterp1D(Interp1D):
         interpolation. Set to ``1e-2`` by default.
     """
     def __init__(self, theta, low, high, quantiles_pred=12, p_tail_limit=0.6,
-                 split_threshold=1e-2):
-        if isinstance(theta, torch.Tensor):
-            theta = theta.detach().cpu().numpy()
+                 split_threshold=1e-2, configs=None):
         self.i = 0
-        quantiles_pred = _set_quantiles_pred(quantiles_pred)
-        knots_pred = np.quantile(theta, quantiles_pred)
-        super(QuantileInterp1D, self).__init__(
-            knots=np.concatenate([[low], knots_pred, [high]]),
-            quantiles=np.concatenate([[0.], quantiles_pred, [1.]]),
-            p_tail_limit=p_tail_limit,
-            split_threshold=split_threshold
-        )
+        if configs is None:
+            if isinstance(theta, torch.Tensor):
+                theta = theta.detach().cpu().numpy()
+            quantiles_pred = _set_quantiles_pred(quantiles_pred)
+            knots_pred = np.quantile(theta, quantiles_pred)
+            super(QuantileInterp1D, self).__init__(
+                knots=np.concatenate([[low], knots_pred, [high]]),
+                quantiles=np.concatenate([[0.], quantiles_pred, [1.]]),
+                p_tail_limit=p_tail_limit,
+                split_threshold=split_threshold
+            )
+        else:
+            super(QuantileInterp1D, self).__init__(configs=configs)
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
                batch_size=None, device='cpu'):
@@ -585,6 +588,10 @@ class QuantileInterp1D(Interp1D):
             return chi2.cdf(norm.ppf(q)**2, df=1)
         else:
             raise NotImplementedError('currently only normal is supported for ref_dist.')
+
+    def broaden(self, broadening_factor=1.1, p_tail_limit=0.6, split_threshold=1e-2):
+        return QuantileInterp1D(configs=broaden(self.configs, broadening_factor, p_tail_limit,
+                                                split_threshold))
 
 
 class _QuantileInterp1D(QuantileInterp1D, nn.Module):
