@@ -915,7 +915,7 @@ cdef void _get_config(const double[::1] knots, const double[::1] quantiles, doub
                 configs[I_SPLIT_FACTORS, i] = inf
             for i in i_all_2:
                 configs[I_SPLIT_FACTORS_2, i] = inf
-            for i in range(n_m - 1):
+            for i in range(1, n_m - 2):
                 configs[I_TYPES, i] = UNDEFINED
 
             _get_split_factors(&configs[I_SPLIT_FACTORS, 2], &configs[I_KNOTS, 0],
@@ -994,25 +994,33 @@ cdef void _broaden_interval(const double[::1] config_knots, const double[::1] co
     for i in range(i0 + 1, i1 + 1):
         if cache_knots[i] >= xc:
             break
+        elif cache_knots[i] <= x0:
+            cache_flags[i] = 1
+            left_removed = config_quantiles[i + 1] - config_quantiles[i0 + 1]
         elif (
-            cache_knots[i] <= x0 or
             (config_quantiles[i0 + 1] - y0) / (cache_knots[i] - x0) >
             (cache_quantiles[i + 1] - cache_quantiles[i]) / (cache_knots[i + 1] - cache_knots[i])
         ):
-            cache_flags[i] = 1
-            left_removed = config_quantiles[i + 1] - config_quantiles[i0 + 1]
+            left_removed = (config_quantiles[i] - y0 -
+                            (cache_knots[i] - x0) * (cache_quantiles[i + 1] - cache_quantiles[i]) /
+                            (cache_knots[i + 1] - cache_knots[i]))
+            break
         else:
             break
     for i in range(i1, i0, -1):
         if cache_knots[i] <= xc:
             break
+        elif cache_knots[i] >= x1:
+            cache_flags[i] = 1
+            right_removed = config_quantiles[i1] - config_quantiles[i - 1]
         elif (
-            cache_knots[i] >= x1 or
             (y1 - config_quantiles[i1]) / (x1 - cache_knots[i]) >
             (cache_quantiles[i] - cache_quantiles[i - 1]) / (cache_knots[i] - cache_knots[i - 1])
         ):
-            cache_flags[i] = 1
-            right_removed = config_quantiles[i1] - config_quantiles[i - 1]
+            right_removed = (y1 - config_quantiles[i] -
+                             (x1 - cache_knots[i]) * (cache_quantiles[i] - cache_quantiles[i - 1]) /
+                             (cache_knots[i] - cache_knots[i - 1]))
+            break
         else:
             break
     for i in range(i0 + 1, i1 + 1):
