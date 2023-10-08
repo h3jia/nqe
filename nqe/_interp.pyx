@@ -40,7 +40,7 @@ ctypedef struct cdf_params:
     double expa1
 
 cdef double XTOL = 1e-8, RTOL = 1e-8, WIDTH_FACTOR = 1., NOT_WIDE_OFFSET = 1e8
-cdef double EPS_DPDX_EXPA = 1e-8
+cdef double EPS_DPDX_EXPA = 1e-8, EXP_CUBIC_THRESHOLD = 0.6, TAIL_MASS_FACTOR = 0.999
 cdef int MITR = 300
 cdef int UNDEFINED = 0, NORMAL_CUBIC = 1, LEFT_END_CUBIC = 2, RIGHT_END_CUBIC = 3, LINEAR = 4
 cdef int DOUBLE_EXP = 5, LEFT_END_EXP = 6, RIGHT_END_EXP = 7 #, MERGE_EXP = 8
@@ -464,16 +464,19 @@ cdef int _get_n_m(const double[::1] array, int n_2) nogil:
 @cython.cdivision(True)
 cdef void _get_cubic_types(double* types, int n_m) nogil:
     cdef size_t i
-    types[1] = LEFT_END_CUBIC if iround(types[2]) not in (DOUBLE_EXP, RIGHT_END_EXP) else LINEAR
-    types[n_m - 3] = (RIGHT_END_CUBIC if iround(types[n_m - 4]) not in (DOUBLE_EXP, LEFT_END_EXP)
-                      else LINEAR)
-    for i in range(2, n_m - 3):
+    # types[1] = LEFT_END_CUBIC if iround(types[2]) not in (DOUBLE_EXP, RIGHT_END_EXP) else LINEAR
+    # types[n_m - 3] = (RIGHT_END_CUBIC if iround(types[n_m - 4]) not in (DOUBLE_EXP, LEFT_END_EXP)
+    #                   else LINEAR)
+    for i in range(1, n_m - 2):
         if iround(types[i]) == UNDEFINED:
-            if iround(types[i - 1]) != DOUBLE_EXP and iround(types[i + 1]) != DOUBLE_EXP:
+            if (iround(types[i - 1]) not in (DOUBLE_EXP, LEFT_END_EXP) and
+                iround(types[i + 1]) not in (DOUBLE_EXP, RIGHT_END_EXP)):
                 types[i] = NORMAL_CUBIC
-            elif iround(types[i - 1]) == DOUBLE_EXP and iround(types[i + 1]) != DOUBLE_EXP:
+            elif (iround(types[i - 1]) in (DOUBLE_EXP, LEFT_END_EXP) and
+                  iround(types[i + 1]) not in (DOUBLE_EXP, RIGHT_END_EXP)):
                 types[i] = LEFT_END_CUBIC
-            elif iround(types[i - 1]) != DOUBLE_EXP and iround(types[i + 1]) == DOUBLE_EXP:
+            elif (iround(types[i - 1]) not in (DOUBLE_EXP, LEFT_END_EXP) and
+                  iround(types[i + 1]) in (DOUBLE_EXP, RIGHT_END_EXP)):
                 types[i] = RIGHT_END_CUBIC
             else:
                 types[i] = LINEAR
@@ -488,7 +491,7 @@ cdef void _get_dydxs(double* dydxs, const double* knots, const double* quantiles
     cdef double h0, h1
     # for i in prange(_max(i_start, 1), _min(i_end + 1, n_interval), nogil=True,
     #                 schedule='static'):
-    for i in range(1, n_interval):
+    for i in range(0, n_interval + 1):
         if iround(types[i]) == LINEAR:
             dydxs[i] = (quantiles[i + 1] - quantiles[i]) / (knots[i + 1] - knots[i])
         elif iround(types[i - 1]) == LINEAR:
@@ -503,7 +506,7 @@ cdef void _get_dydxs(double* dydxs, const double* knots, const double* quantiles
             h1 = knots[i + 2] - knots[i + 1]
             dydxs[i] = _get_dydx_1(h0, h1, (quantiles[i + 1] - quantiles[i]) / h0,
                                    (quantiles[i + 2] - quantiles[i + 1]) / h1, p_tail_limit)
-        elif iround(types[i]) == DOUBLE_EXP or iround(types[i]) == RIGHT_END_EXP:
+        elif iround(types[i - 1]) == RIGHT_END_CUBIC:
             h0 = knots[i] - knots[i - 1]
             h1 = knots[i - 1] - knots[i - 2]
             dydxs[i] = _get_dydx_1(h0, h1, (quantiles[i] - quantiles[i - 1]) / h0,
@@ -907,8 +910,21 @@ cdef void _get_config(const double[::1] knots, const double[::1] quantiles, doub
         configs[I_DYDXS, 2] = m1
 
     elif n_m >= 4:
-        configs[I_TYPES, 0] = LEFT_END_EXP
-        configs[I_TYPES, n_m - 2] = RIGHT_END_EXP
+        if ((configs[I_QUANTILES, 1] - configs[I_QUANTILES, 0]) /
+            (configs[I_KNOTS, 1] - configs[I_KNOTS, 0]) <
+            EXP_CUBIC_THRESHOLD * (configs[I_QUANTILES, 2] - configs[I_QUANTILES, 1]) /
+            (configs[I_KNOTS, 2] - configs[I_KNOTS, 1])):
+            configs[I_TYPES, 0] = LEFT_END_EXP
+        else:
+            configs[I_TYPES, 0] = LEFT_END_CUBIC
+
+        if ((configs[I_QUANTILES, n_m - 1] - configs[I_QUANTILES, n_m - 2]) /
+            (configs[I_KNOTS, n_m - 1] - configs[I_KNOTS, n_m - 2]) <
+            EXP_CUBIC_THRESHOLD * (configs[I_QUANTILES, n_m - 2] - configs[I_QUANTILES, n_m - 3]) /
+            (configs[I_KNOTS, n_m - 2] - configs[I_KNOTS, n_m - 3])):
+            configs[I_TYPES, n_m - 2] = RIGHT_END_EXP
+        else:
+            configs[I_TYPES, n_m - 2] = RIGHT_END_CUBIC
 
         if n_m >= 5:
             for i in i_all:
@@ -998,10 +1014,10 @@ cdef void _broaden_interval(const double[::1] config_knots, const double[::1] co
             cache_flags[i] = 1
             left_removed = config_quantiles[i + 1] - config_quantiles[i0 + 1]
         elif (
-            (config_quantiles[i0 + 1] - y0) / (cache_knots[i] - x0) >
+            (config_quantiles[i0 + 1] - y0) / (cache_knots[i] - x0) > TAIL_MASS_FACTOR *
             (cache_quantiles[i + 1] - cache_quantiles[i]) / (cache_knots[i + 1] - cache_knots[i])
         ):
-            left_removed = (config_quantiles[i] - y0 -
+            left_removed = (config_quantiles[i] - y0 - TAIL_MASS_FACTOR *
                             (cache_knots[i] - x0) * (cache_quantiles[i + 1] - cache_quantiles[i]) /
                             (cache_knots[i + 1] - cache_knots[i]))
             break
@@ -1014,10 +1030,10 @@ cdef void _broaden_interval(const double[::1] config_knots, const double[::1] co
             cache_flags[i] = 1
             right_removed = config_quantiles[i1] - config_quantiles[i - 1]
         elif (
-            (y1 - config_quantiles[i1]) / (x1 - cache_knots[i]) >
+            (y1 - config_quantiles[i1]) / (x1 - cache_knots[i]) > TAIL_MASS_FACTOR *
             (cache_quantiles[i] - cache_quantiles[i - 1]) / (cache_knots[i] - cache_knots[i - 1])
         ):
-            right_removed = (y1 - config_quantiles[i] -
+            right_removed = (y1 - config_quantiles[i] - TAIL_MASS_FACTOR *
                              (x1 - cache_knots[i]) * (cache_quantiles[i] - cache_quantiles[i - 1]) /
                              (cache_knots[i] - cache_knots[i - 1]))
             break
