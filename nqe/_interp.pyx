@@ -784,6 +784,9 @@ cdef double _get_cdf_local(double y, const double[:, ::1] configs, int n_2) nogi
             if iround(configs[I_TYPES, j - dj]) == LEFT_END_EXP:
                 y0 = configs[I_QUANTILES, j - dj]
                 break
+            if dj == j:
+                y0 = 0.
+                break
         for dj in range(0, n_m - j - 1):
             if (iround(configs[I_TYPES, j + dj]) == DOUBLE_EXP and
                 y < 0.5 * (configs[I_QUANTILES, j + dj] + configs[I_QUANTILES, j + dj + 1])):
@@ -791,6 +794,9 @@ cdef double _get_cdf_local(double y, const double[:, ::1] configs, int n_2) nogi
                 break
             if iround(configs[I_TYPES, j + dj]) == RIGHT_END_EXP:
                 y1 = configs[I_QUANTILES, j + dj + 1]
+                break
+            if dj == n_m - j - 2:
+                y1 = 1.
                 break
         return (y - y0) / (y1 - y0)
 
