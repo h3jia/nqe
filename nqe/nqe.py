@@ -354,7 +354,7 @@ class QuantileNet1D(MLP):
                         split_threshold=self.split_threshold)
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, d=None, batch_size=None,
-               device='cpu'):
+               device='cpu', broadening_factor=None):
         random_seed = np.random.default_rng(random_seed)
         i = self.i
         d = 1 if d is None else int(d)
@@ -373,7 +373,8 @@ class QuantileNet1D(MLP):
                                  theta=(theta if (theta is None or theta.shape[0] <= 1) else
                                         theta[(i * batch_size):((i + 1) * batch_size)]),
                                  random_seed=random_seed, sobol=sobol, d=d, batch_size=batch_size,
-                                 device=device) for i in range(int(np.ceil(n / batch_size)))]
+                                 device=device, broadening_factor=broadening_factor)
+                     for i in range(int(np.ceil(n / batch_size)))]
                 )
             else:
                 n, x, theta = _broadcast_batch(n, x, theta)
@@ -383,7 +384,8 @@ class QuantileNet1D(MLP):
                     theta = theta.contiguous().to(device)
                 knots_pred = self(x, theta).detach().cpu().numpy()
                 return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed, sobol=sobol,
-                                                         i=i, d=d)
+                                                         i=i, d=d,
+                                                         broadening_factor=broadening_factor)
 
     def _f_interp(self, x, theta, batch_size, device, target, **kwargs):
         i = self.i
@@ -421,22 +423,25 @@ class QuantileNet1D(MLP):
                 theta_now = theta[:, i].detach().cpu().numpy().astype(np.float64)
                 knots_pred = self(x, theta_prev).detach().cpu().numpy().astype(np.float64)
                 if target == 'pdf':
-                    return self.interp_1d(knots_pred).pdf(x=theta_now)
+                    return self.interp_1d(knots_pred).pdf(x=theta_now, **kwargs)
                 elif target == 'cdf':
                     return self.interp_1d(knots_pred).cdf(x=theta_now, **kwargs)
                 else:
                     raise ValueError('invalid value for target.')
 
-    def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
-        return self._f_interp(x=x, theta=theta, batch_size=batch_size, device=device, target='pdf')
+    def pdf(self, x=None, theta=None, batch_size=None, device='cpu', broadening_factor=None):
+        return self._f_interp(x=x, theta=theta, batch_size=batch_size, device=device, target='pdf',
+                              broadening_factor=broadening_factor)
 
-    def cdf(self, x=None, theta=None, local=False, batch_size=None, device='cpu'):
+    def cdf(self, x=None, theta=None, local=False, batch_size=None, device='cpu',
+            broadening_factor=None):
         return self._f_interp(x=x, theta=theta, batch_size=batch_size, device=device, target='cdf',
-                              local=local)
+                              local=local, broadening_factor=broadening_factor)
 
     def q_rank(self, x=None, theta=None, local=True, ref_dist='normal', batch_size=None,
-               device='cpu'):
-        q = self.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device)
+               device='cpu', broadening_factor=None):
+        q = self.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device,
+                     broadening_factor=broadening_factor)
         if isinstance(ref_dist, str) and ref_dist.lower() in ('normal', 'norm', 'gaussian'):
             return chi2.cdf(norm.ppf(q)**2, df=1)
         else:
@@ -553,8 +558,9 @@ class QuantileInterp1D(Interp1D):
             super(QuantileInterp1D, self).__init__(configs=configs)
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
-               batch_size=None, device='cpu'):
-        return Interp1D.sample(self, n=n, random_seed=random_seed, sobol=sobol, i=i, d=d)
+               batch_size=None, device='cpu', broadening_factor=None):
+        return Interp1D.sample(self, n=n, random_seed=random_seed, sobol=sobol, i=i, d=d,
+                               broadening_factor=broadening_factor)
 
     def _check_theta(self, theta):
         try:
@@ -573,25 +579,27 @@ class QuantileInterp1D(Interp1D):
             raise ValueError('invalid value for theta.')
         return theta
 
-    def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
+    def pdf(self, x=None, theta=None, batch_size=None, device='cpu', broadening_factor=None):
         theta = self._check_theta(theta)
-        return Interp1D.pdf(self, x=theta)
+        return Interp1D.pdf(self, x=theta, broadening_factor=broadening_factor)
 
-    def cdf(self, x=None, theta=None, local=False, batch_size=None, device='cpu'):
+    def cdf(self, x=None, theta=None, local=False, batch_size=None, device='cpu',
+            broadening_factor=None):
         theta = self._check_theta(theta)
-        return Interp1D.cdf(self, x=theta, local=local)
+        return Interp1D.cdf(self, x=theta, local=local, broadening_factor=broadening_factor)
 
     def q_rank(self, x=None, theta=None, local=True, ref_dist='normal', batch_size=None,
-               device='cpu'):
-        q = self.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device)
+               device='cpu', broadening_factor=None):
+        q = self.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device,
+                     broadening_factor=broadening_factor)
         if isinstance(ref_dist, str) and ref_dist.lower() in ('normal', 'norm', 'gaussian'):
             return chi2.cdf(norm.ppf(q)**2, df=1)
         else:
             raise NotImplementedError('currently only normal is supported for ref_dist.')
 
-    def broaden(self, broadening_factor=1.1, p_tail_limit=0.6, split_threshold=1e-2):
-        return QuantileInterp1D(configs=broaden(self.configs, broadening_factor, p_tail_limit,
-                                                split_threshold))
+    def broaden(self, broadening_factor=1.1):
+        return QuantileInterp1D(configs=broaden(self.configs, broadening_factor, self.p_tail_limit,
+                                                self.split_threshold))
 
 
 class _QuantileInterp1D(QuantileInterp1D, nn.Module):
@@ -636,7 +644,7 @@ class QuantileNet(nn.ModuleList):
         return True
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, batch_size=None,
-               device='cpu'):
+               device='cpu', broadening_factor=None):
         # theta is not used
         n, x, _ = _check_n_x_theta(n, x, None)
         random_seed = np.random.default_rng(random_seed)
@@ -649,29 +657,31 @@ class QuantileNet(nn.ModuleList):
                     [self.sample(n=min(batch_size, n - i * batch_size),
                                  x=(x if (x is None or x.shape[0] <= 1) else
                                     x[(i * batch_size):((i + 1) * batch_size)]),
-                                 theta=None,
-                                 random_seed=random_seed, sobol=sobol, batch_size=batch_size,
-                                 device=device) for i in range(int(np.ceil(n / batch_size)))]
+                                 theta=None, random_seed=random_seed, sobol=sobol,
+                                 batch_size=batch_size, device=device,
+                                 broadening_factor=broadening_factor)
+                     for i in range(int(np.ceil(n / batch_size)))]
                 )
             else:
                 theta_all = self[0].sample(n=n, x=x, random_seed=random_seed, sobol=sobol,
-                                           d=len(self), batch_size=batch_size,
-                                           device=device)[:, None]
+                                           d=len(self), batch_size=batch_size, device=device,
+                                           broadening_factor=broadening_factor)[:, None]
                 for i in range(1, len(self)):
                     theta_now = self[i].sample(n=n, x=x, theta=theta_all, random_seed=random_seed,
                                                sobol=sobol, d=len(self), batch_size=batch_size,
-                                               device=device)[: None]
+                                               device=device,
+                                               broadening_factor=broadening_factor)[: None]
                     theta_all = np.concatenate((theta_all, theta_now[:, None]), axis=1)
                 return theta_all
 
-    def pdf(self, x=None, theta=None, batch_size=None, device='cpu'):
-        return np.prod(
-            [s.pdf(x=x, theta=theta, batch_size=batch_size, device=device) for s in self], axis=0)
+    def pdf(self, x=None, theta=None, batch_size=None, device='cpu', broadening_factor=None):
+        return np.prod([s.pdf(x=x, theta=theta, batch_size=batch_size, device=device,
+                              broadening_factor=broadening_factor) for s in self], axis=0)
 
     def q_rank(self, x=None, theta=None, local=True, ref_dist='normal', batch_size=None,
-               device='cpu'):
-        q = np.array([s.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device) for
-                      s in self])
+               device='cpu', broadening_factor=None):
+        q = np.array([s.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device,
+                            broadening_factor=broadening_factor) for s in self])
         if isinstance(ref_dist, str) and ref_dist.lower() in ('normal', 'norm', 'gaussian'):
             return chi2.cdf(np.sum(norm.ppf(q)**2, axis=0), df=len(self))
         else:

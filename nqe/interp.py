@@ -48,8 +48,8 @@ def get_configs(knots, quantiles, p_tail_limit=0.6, split_threshold=1e-2):
     else:
         raise ValueError('the shapes of knots and quantiles do not match.')
     configs = np.full((knots.shape[0], N_CONFIG_INDICES, knots.shape[1]), np.nan, dtype=np.float64)
-    _get_configs(knots, quantiles, configs, knots.shape[0], knots.shape[1], p_tail_limit,
-                 split_threshold)
+    _get_configs(knots, quantiles, configs, knots.shape[0], knots.shape[1], float(p_tail_limit),
+                 float(split_threshold))
     return configs
 
 
@@ -135,32 +135,47 @@ class Interp1D:
             self.configs = _check_configs(configs)
         else:
             self.configs = get_configs(knots, quantiles, p_tail_limit, split_threshold)
+        self.p_tail_limit = float(p_tail_limit)
+        self.split_threshold = float(split_threshold)
         self._ok = True # need this for nqe._QuantileInterp1D
 
-    def pdf(self, x):
+    def pdf(self, x, broadening_factor=None):
         if self._ok:
-            return pdf(self.configs, x)
+            if broadening_factor is not None:
+                return self.broaden(broadening_factor).pdf(x=x)
+            else:
+                return pdf(self.configs, x)
         else:
             raise RuntimeError('this Interp1D has not been fitted.')
 
-    def cdf(self, x, local=False):
+    def cdf(self, x, local=False, broadening_factor=None):
         if self._ok:
-            return cdf(self.configs, x, local)
+            if broadening_factor is not None:
+                return self.broaden(broadening_factor).cdf(x=x, local=local)
+            else:
+                return cdf(self.configs, x, local)
         else:
             raise RuntimeError('this Interp1D has not been fitted.')
 
-    def ppf(self, y):
+    def ppf(self, y, broadening_factor=None):
         if self._ok:
-            return ppf(self.configs, y)
+            if broadening_factor is not None:
+                return self.broaden(broadening_factor).ppf(y=y)
+            else:
+                return ppf(self.configs, y)
         else:
             raise RuntimeError('this Interp1D has not been fitted.')
 
-    def sample(self, n, random_seed=None, sobol=True, i=None, d=None):
+    def sample(self, n=1, random_seed=None, sobol=True, i=None, d=None, broadening_factor=None):
         if self._ok:
-            return sample(self.configs, n, random_seed, sobol, i, d)
+            if broadening_factor is not None:
+                return self.broaden(broadening_factor).sample(n=n, random_seed=random_seed,
+                                                              sobol=sobol, i=i, d=d)
+            else:
+                return sample(self.configs, n, random_seed, sobol, i, d)
         else:
             raise RuntimeError('this Interp1D has not been fitted.')
 
-    def broaden(self, broadening_factor=1.1, p_tail_limit=0.6, split_threshold=1e-2):
-        return Interp1D(configs=broaden(self.configs, broadening_factor, p_tail_limit,
-                                        split_threshold))
+    def broaden(self, broadening_factor=1.1):
+        return Interp1D(configs=broaden(self.configs, broadening_factor, self.p_tail_limit,
+                                        self.split_threshold))
