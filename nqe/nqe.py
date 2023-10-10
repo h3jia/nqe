@@ -13,18 +13,18 @@ __all__ = ['QuantileLoss', 'MLP', 'QuantileNet1D', 'QuantileInterp1D', 'Quantile
            'get_quantile_net', 'train_1d', 'TrainResult']
 
 
-def _set_quantiles_pred(quantiles_pred):
-    if isinstance(quantiles_pred, int):
-        quantiles_pred = np.linspace(0, 1, quantiles_pred + 1)[1:-1]
+def _set_cdfs_pred(cdfs_pred):
+    if isinstance(cdfs_pred, int):
+        cdfs_pred = np.linspace(0, 1, cdfs_pred + 1)[1:-1]
     else:
         try:
-            quantiles_pred = np.asarray(quantiles_pred, dtype=float).reshape(-1)
-            assert np.all(quantiles_pred > 0.)
-            assert np.all(quantiles_pred < 1.)
-            assert np.all(np.diff(quantiles_pred) > 0.)
+            cdfs_pred = np.asarray(cdfs_pred, dtype=float).reshape(-1)
+            assert np.all(cdfs_pred > 0.)
+            assert np.all(cdfs_pred < 1.)
+            assert np.all(np.diff(cdfs_pred) > 0.)
         except Exception:
             raise ValueError
-    return quantiles_pred
+    return cdfs_pred
 
 
 class QuantileLoss:
@@ -33,22 +33,25 @@ class QuantileLoss:
 
     Parameters
     ----------
-    quantiles_pred : 1-d array_like
-        The quantiles you want to predict, should be larger than 0 and smaller than 1.
+    cdfs_pred : int or array_like of float, optional
+        The CDFs corresponding to the quantiles you want to predict. If ``int``, will divide the
+        interval ``[0, 1]`` into ``cdfs_pred`` bins and therefore fit the evenly spaced
+        ``cdfs_pred - 1`` quantiles between ``0`` (exclusive) and ``1`` (exclusive). Otherwise,
+        should be in ascending order, larger than 0, and smaller than 1. Set to ``16`` by default.
     a0 : float, optional
-        Each term in the loss will be weighted by ``exp(a0 * abs(quantile - 0.5))``. Set to ``0.``
-        by default.
+        Each term in the loss will be weighted by ``exp(a0 * abs(cdf - 0.5))``. Set to ``0.`` by
+        default.
     device : str, optional
         The device on which you train the model. Set to ``'cpu'`` by default.
     """
-    def __init__(self, quantiles_pred, a0=4., device='cpu'):
-        self.quantiles_pred = torch.as_tensor(quantiles_pred, dtype=torch.float).to(device)
+    def __init__(self, cdfs_pred, a0=4., device='cpu'):
+        self.cdfs_pred = torch.as_tensor(_set_cdfs_pred(cdfs_pred), dtype=torch.float).to(device)
         self.a0 = float(a0)
-        self._weights = (torch.exp(self.a0 * torch.abs(self.quantiles_pred - 0.5))[None]).to(device)
+        self._weights = (torch.exp(self.a0 * torch.abs(self.cdfs_pred - 0.5))[None]).to(device)
 
     def __call__(self, input, target):
         # in_now shape: # of points, (# of data dims + # of previous theta dims)
-        # input = model(in_now) shape: # of points, # of quantiles
+        # input = model(in_now) shape: # of points, # of cdfs
         # target = out_now shape: # of points
         if target.ndim == input.ndim:
             pass
@@ -56,7 +59,7 @@ class QuantileLoss:
             target = target[..., None]
         else:
             raise RuntimeError
-        weights = torch.where(target > input, self.quantiles_pred, 1. - self.quantiles_pred)
+        weights = torch.where(target > input, self.cdfs_pred, 1. - self.cdfs_pred)
         return torch.mean(torch.abs(weights * self._weights * (input - target)))
 
 
@@ -244,11 +247,11 @@ class QuantileNet1D(MLP):
         The lower bound of prior.
     high : float
         The upper bound of prior.
-    quantiles_pred : int or array_like of float, optional
-        The quantiles to fit. If ``int``, will divide the interval ``[0, 1]`` into
-        ``quantiles_pred`` bins and therefore fit the evenly spaced ``quantiles_pred - 1`` quantiles
-        between ``0`` (exclusive) and ``1`` (exclusive). Otherwise, should be in ascending order,
-        larger than 0, and smaller than 1. Set to ``12`` by default.
+    cdfs_pred : int or array_like of float, optional
+        The CDFs corresponding to the quantiles you want to predict. If ``int``, will divide the
+        interval ``[0, 1]`` into ``cdfs_pred`` bins and therefore fit the evenly spaced
+        ``cdfs_pred - 1`` quantiles between ``0`` (exclusive) and ``1`` (exclusive). Otherwise,
+        should be in ascending order, larger than 0, and smaller than 1. Set to ``16`` by default.
     quantile_method : str, optional
         Should be either ``'cumsum'`` or ``'binary'``. Note that ``'binary'`` is not well tested at
         the moment.
@@ -262,21 +265,21 @@ class QuantileNet1D(MLP):
         interpolation. Set to ``1e-2`` by default.
     kwargs : dict, optional
         Additional keyword arguments to be passed to ``MLP``. Note that the ``output_neurons``
-        parameter will be automatically set according to ``quantiles_pred``.
+        parameter will be automatically set according to ``cdfs_pred``.
 
     Notes
     -----
     See ``MLP`` for the additional parameters, some of which are required by the initializer.
     """
-    def __init__(self, i, low, high, quantiles_pred=12, quantile_method='cumsum', binary_depth=0,
+    def __init__(self, i, low, high, cdfs_pred=16, quantile_method='cumsum', binary_depth=0,
                  p_tail_limit=0.6, split_threshold=1e-2, **kwargs):
-        self.quantiles_pred = _set_quantiles_pred(quantiles_pred)
-        kwargs['output_neurons'] = self.quantiles_pred.size + 1
+        self.cdfs_pred = _set_cdfs_pred(cdfs_pred)
+        kwargs['output_neurons'] = self.cdfs_pred.size + 1
         super(QuantileNet1D, self).__init__(**kwargs)
         self.i = int(i)
         self.low = float(low)
         self.high = float(high)
-        self.quantiles = np.concatenate([[0.], self.quantiles_pred, [1.]])
+        self.cdfs = np.concatenate([[0.], self.cdfs_pred, [1.]])
         self.quantile_method = str(quantile_method)
         if self.quantile_method not in ('cumsum', 'binary'):
             raise ValueError
@@ -350,7 +353,7 @@ class QuantileNet1D(MLP):
         knots = np.concatenate([np.full((knots_pred.shape[0], 1), self.low),
                                 knots_pred,
                                 np.full((knots_pred.shape[0], 1), self.high)], axis=1)
-        return Interp1D(knots=knots, quantiles=self.quantiles, p_tail_limit=self.p_tail_limit,
+        return Interp1D(knots=knots, cdfs=self.cdfs, p_tail_limit=self.p_tail_limit,
                         split_threshold=self.split_threshold)
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, d=None, batch_size=None,
@@ -438,14 +441,27 @@ class QuantileNet1D(MLP):
         return self._f_interp(x=x, theta=theta, batch_size=batch_size, device=device, target='cdf',
                               local=local, broadening_factor=broadening_factor)
 
-    def q_rank(self, x=None, theta=None, local=True, ref_dist='normal', batch_size=None,
-               device='cpu', broadening_factor=None):
-        q = self.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device,
-                     broadening_factor=broadening_factor)
-        if isinstance(ref_dist, str) and ref_dist.lower() in ('normal', 'norm', 'gaussian'):
-            return chi2.cdf(norm.ppf(q)**2, df=1)
+    def qm_latent(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
+                  broadening_factor=None):
+        if qm_method.lower() == 'cdf':
+            return self.cdf(x=x, theta=theta, local=False, batch_size=batch_size, device=device,
+                            broadening_factor=broadening_factor)
+        elif qm_method.lower() == 'cdf_local':
+            return self.cdf(x=x, theta=theta, local=True, batch_size=batch_size, device=device,
+                            broadening_factor=broadening_factor)
         else:
-            raise NotImplementedError('currently only normal is supported for ref_dist.')
+            raise NotImplementedError('currently only cdf and cdf_local are implemented for '
+                                      'ref_dist.')
+
+    def qm_rank(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
+                broadening_factor=None, qm_latent=None, ref_dist='gaussian'):
+        if qm_latent is None:
+            qm_latent = self.qm_latent(x=x, theta=theta, qm_method=qm_method, batch_size=batch_size,
+                                       device=device, broadening_factor=broadening_factor)
+        if isinstance(ref_dist, str) and ref_dist.lower() == 'gaussian':
+            return chi2.cdf(norm.ppf(qm_latent)**2, df=1)
+        else:
+            raise NotImplementedError('currently only gaussian is implemented for ref_dist.')
 
 
 def _check_n_x_theta(n, x, theta):
@@ -528,11 +544,11 @@ class QuantileInterp1D(Interp1D):
         The lower bound of prior.
     high : float
         The upper bound of prior.
-    quantiles_pred : int or array_like of float, optional
-        The quantiles to fit. If ``int``, will divide the interval ``[0, 1]`` into
-        ``quantiles_pred`` bins and therefore fit the evenly spaced ``quantiles_pred - 1`` quantiles
-        between ``0`` (exclusive) and ``1`` (exclusive). Otherwise, should be in ascending order,
-        larger than 0, and smaller than 1. Set to ``12`` by default.
+    cdfs_pred : int or array_like of float, optional
+        The CDFs corresponding to the quantiles you want to predict. If ``int``, will divide the
+        interval ``[0, 1]`` into ``cdfs_pred`` bins and therefore fit the evenly spaced
+        ``cdfs_pred - 1`` quantiles between ``0`` (exclusive) and ``1`` (exclusive). Otherwise,
+        should be in ascending order, larger than 0, and smaller than 1. Set to ``16`` by default.
     p_tail_limit : float, optional
         Lower bound of the tail pdf in the one-side boundary interpolation scheme. Set to ``0.7``
         by default.
@@ -540,17 +556,17 @@ class QuantileInterp1D(Interp1D):
         The threshold for splitting into two peaks to account for multimodality during the
         interpolation. Set to ``1e-2`` by default.
     """
-    def __init__(self, theta, low, high, quantiles_pred=12, p_tail_limit=0.6,
-                 split_threshold=1e-2, configs=None):
+    def __init__(self, theta, low, high, cdfs_pred=16, p_tail_limit=0.6, split_threshold=1e-2,
+                 configs=None):
         self.i = 0
         if configs is None:
             if isinstance(theta, torch.Tensor):
                 theta = theta.detach().cpu().numpy()
-            quantiles_pred = _set_quantiles_pred(quantiles_pred)
-            knots_pred = np.quantile(theta, quantiles_pred)
+            cdfs_pred = _set_cdfs_pred(cdfs_pred)
+            knots_pred = np.quantile(theta, cdfs_pred)
             super(QuantileInterp1D, self).__init__(
                 knots=np.concatenate([[low], knots_pred, [high]]),
-                quantiles=np.concatenate([[0.], quantiles_pred, [1.]]),
+                cdfs=np.concatenate([[0.], cdfs_pred, [1.]]),
                 p_tail_limit=p_tail_limit,
                 split_threshold=split_threshold
             )
@@ -588,14 +604,27 @@ class QuantileInterp1D(Interp1D):
         theta = self._check_theta(theta)
         return Interp1D.cdf(self, x=theta, local=local, broadening_factor=broadening_factor)
 
-    def q_rank(self, x=None, theta=None, local=True, ref_dist='normal', batch_size=None,
-               device='cpu', broadening_factor=None):
-        q = self.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device,
-                     broadening_factor=broadening_factor)
-        if isinstance(ref_dist, str) and ref_dist.lower() in ('normal', 'norm', 'gaussian'):
-            return chi2.cdf(norm.ppf(q)**2, df=1)
+    def qm_latent(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
+                  broadening_factor=None):
+        if qm_method.lower() == 'cdf':
+            return self.cdf(x=x, theta=theta, local=False, batch_size=batch_size, device=device,
+                            broadening_factor=broadening_factor)
+        elif qm_method.lower() == 'cdf_local':
+            return self.cdf(x=x, theta=theta, local=True, batch_size=batch_size, device=device,
+                            broadening_factor=broadening_factor)
         else:
-            raise NotImplementedError('currently only normal is supported for ref_dist.')
+            raise NotImplementedError('currently only cdf and cdf_local are implemented for '
+                                      'ref_dist.')
+
+    def qm_rank(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
+                broadening_factor=None, qm_latent=None, ref_dist='gaussian'):
+        if qm_latent is None:
+            qm_latent = self.qm_latent(x=x, theta=theta, qm_method=qm_method, batch_size=batch_size,
+                                       device=device, broadening_factor=broadening_factor)
+        if isinstance(ref_dist, str) and ref_dist.lower() == 'gaussian':
+            return chi2.cdf(norm.ppf(qm_latent)**2, df=1)
+        else:
+            raise NotImplementedError('currently only gaussian is implemented for ref_dist.')
 
     def broaden(self, broadening_factor=1.1):
         return QuantileInterp1D(configs=broaden(self.configs, broadening_factor, self.p_tail_limit,
@@ -606,11 +635,11 @@ class _QuantileInterp1D(QuantileInterp1D, nn.Module):
     """
     Placeholder for potentially-not-yet-fitted QuantileInterp1D.
     """
-    def __init__(self, low, high, quantiles_pred=12, p_tail_limit=0.6, split_threshold=1e-2):
+    def __init__(self, low, high, cdfs_pred=16, p_tail_limit=0.6, split_threshold=1e-2):
         self.i = 0
         self.low = low
         self.high = high
-        self.quantiles_pred = quantiles_pred
+        self.cdfs_pred = cdfs_pred
         self.p_tail_limit = p_tail_limit
         self.split_threshold = split_threshold
         self._ok = False
@@ -619,8 +648,7 @@ class _QuantileInterp1D(QuantileInterp1D, nn.Module):
 
     def fit(self, theta):
         QuantileInterp1D.__init__(self, theta=theta, low=self.low, high=self.high,
-                                  quantiles_pred=self.quantiles_pred,
-                                  p_tail_limit=self.p_tail_limit,
+                                  cdfs_pred=self.cdfs_pred, p_tail_limit=self.p_tail_limit,
                                   split_threshold=self.split_threshold)
 
 
@@ -678,18 +706,26 @@ class QuantileNet(nn.ModuleList):
         return np.prod([s.pdf(x=x, theta=theta, batch_size=batch_size, device=device,
                               broadening_factor=broadening_factor) for s in self], axis=0)
 
-    def q_rank(self, x=None, theta=None, local=True, ref_dist='normal', batch_size=None,
-               device='cpu', broadening_factor=None):
-        q = np.array([s.cdf(x=x, theta=theta, local=local, batch_size=batch_size, device=device,
-                            broadening_factor=broadening_factor) for s in self])
-        if isinstance(ref_dist, str) and ref_dist.lower() in ('normal', 'norm', 'gaussian'):
-            return chi2.cdf(np.sum(norm.ppf(q)**2, axis=0), df=len(self))
+    def qm_latent(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
+                  broadening_factor=None):
+        return np.concatenate([s.qm_latent(x=x, theta=theta, qm_method=qm_method,
+                                           batch_size=batch_size, device=device,
+                                           broadening_factor=broadening_factor)[:, None]
+                               for s in self], axis=1)
+
+    def qm_rank(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
+                broadening_factor=None, qm_latent=None, ref_dist='gaussian'):
+        if qm_latent is None:
+            qm_latent = self.qm_latent(x=x, theta=theta, qm_method=qm_method, batch_size=batch_size,
+                                       device=device, broadening_factor=broadening_factor)
+        if isinstance(ref_dist, str) and ref_dist.lower() == 'gaussian':
+            return chi2.cdf(np.sum(norm.ppf(qm_latent)**2, axis=1), df=len(self))
         else:
-            raise NotImplementedError('currently only normal is supported for ref_dist.')
+            raise NotImplementedError('currently only gaussian is implemented for ref_dist.')
 
 
 def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_end=None,
-                     quantiles_pred=12, p_tail_limit=0.6, split_threshold=1e-2, activation='relu',
+                     cdfs_pred=16, p_tail_limit=0.6, split_threshold=1e-2, activation='relu',
                      batch_norm=False, shortcut=True, embedding_net=None):
     low = np.asarray(low)
     high = np.asarray(high)
@@ -699,8 +735,7 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
     for i in range(low.size):
         if (i_start is None or i >= i_start) and (i_end is None or i < i_end):
             if input_neurons == 0 and i == 0:
-                module_list.append(_QuantileInterp1D(low=low[0], high=high[0],
-                                                     quantiles_pred=quantiles_pred,
+                module_list.append(_QuantileInterp1D(low=low[0], high=high[0], cdfs_pred=cdfs_pred,
                                                      p_tail_limit=p_tail_limit,
                                                      split_threshold=split_threshold))
             else:
@@ -709,11 +744,10 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
                 else:
                     embedding_net_now = embedding_net
                 module_list.append(QuantileNet1D(
-                    i=i, low=low[i], high=high[i], quantiles_pred=quantiles_pred,
-                    p_tail_limit=p_tail_limit, split_threshold=split_threshold,
-                    input_neurons=input_neurons + i, hidden_neurons=hidden_neurons,
-                    activation=activation, batch_norm=batch_norm, shortcut=shortcut,
-                    embedding_net=embedding_net_now
+                    i=i, low=low[i], high=high[i], cdfs_pred=cdfs_pred, p_tail_limit=p_tail_limit,
+                    split_threshold=split_threshold, input_neurons=input_neurons + i,
+                    hidden_neurons=hidden_neurons, activation=activation, batch_norm=batch_norm,
+                    shortcut=shortcut, embedding_net=embedding_net_now
                 ))
         else:
             module_list.append(None)
@@ -841,10 +875,9 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             quantile_net_1d.set_rescaling(mu_x=mu_x, sigma_x=sigma_x, mu_theta=mu_theta,
                                           sigma_theta=sigma_theta)
 
-        loss = QuantileLoss(quantile_net_1d.quantiles_pred, a0, device=device)
-        # quantiles_c = np.concatenate([[0.], quantile_net_1d.quantiles_pred, [1.]])
-        # quantiles_c = torch.as_tensor(0.5 * (quantiles_c[:-1] + quantiles_c[1:]),
-        #                               dtype=torch.float)
+        loss = QuantileLoss(quantile_net_1d.cdfs_pred, a0, device=device)
+        # cdfs_c = np.concatenate([[0.], quantile_net_1d.cdfs_pred, [1.]])
+        # cdfs_c = torch.as_tensor(0.5 * (cdfs_c[:-1] + cdfs_c[1:]), dtype=torch.float)
 
         if isinstance(optimizer, type) and issubclass(optimizer, torch.optim.Optimizer):
             optimizer = optimizer(quantile_net_1d.parameters(), **optimizer_kwargs)
