@@ -761,7 +761,7 @@ def get_quantile_net(low, high, input_neurons, hidden_neurons, i_start=None, i_e
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, a0=4., b1=0.5, c1=1.,
              custom_l1=None, rescale_data=False, target_loss_ratio=0., beta_reg=0.5,
-             drop_edge=False, lambda_max_factor=3., initial_max_ratio=0.1, initial_ratio_epochs=10,
+             drop_largest=0., lambda_max_factor=3., initial_max_ratio=0.1, initial_ratio_epochs=10,
              optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
              learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
              stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
@@ -937,14 +937,18 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                     y_now = quantile_net_1d(x_now, None, return_raw=True)
                 l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
                 if target_loss_ratio_now > 0.:
+                    y_now_1 = y_now[1]
+                    if drop_largest > 0.:
+                        if 0. < drop_largest < 1.:
+                            n_drop = int(y_now_1.shape[-1] * drop_largest)
+                        else:
+                            n_drop = int(drop_largest)
+                        y_now_1 = torch.sort(y_now_1, dim=-1, descending=True)[0][..., n_drop:]
                     if custom_l1 is not None:
-                        l1_now = custom_l1(y_now[1])
+                        l1_now = custom_l1(y_now_1)
                     else:
-                        l1_now = torch.where(y_now[1] > c1, 2 * (y_now[1] - c1) + c1**2,
-                                             y_now[1]**2)
-                        l1_now *= torch.where(y_now[1] > 0., b1, 1.)
-                    if drop_edge:
-                        l1_now = l1_now[..., 1:-1]
+                        l1_now = torch.where(y_now_1 > c1, 2 * (y_now_1 - c1) + c1**2, y_now_1**2)
+                        l1_now *= torch.where(y_now_1 > 0., b1, 1.)
                     l1_now = torch.mean(l1_now)
                 else:
                     l1_now = torch.tensor(0.)
@@ -973,14 +977,19 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                         y_now = quantile_net_1d(x_now, None, return_raw=True)
                     l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
                     if target_loss_ratio_now > 0.:
+                        y_now_1 = y_now[1]
+                        if drop_largest > 0.:
+                            if 0. < drop_largest < 1.:
+                                n_drop = int(y_now_1.shape[-1] * drop_largest)
+                            else:
+                                n_drop = int(drop_largest)
+                            y_now_1 = torch.sort(y_now_1, dim=-1, descending=True)[0][..., n_drop:]
                         if custom_l1 is not None:
-                            l1_now = custom_l1(y_now[1])
+                            l1_now = custom_l1(y_now_1)
                         else:
-                            l1_now = torch.where(y_now[1] > c1, 2 * (y_now[1] - c1) + c1**2,
-                                                 y_now[1]**2)
-                            l1_now *= torch.where(y_now[1] > 0., b1, 1.)
-                        if drop_edge:
-                            l1_now = l1_now[..., 1:-1]
+                            l1_now = torch.where(y_now_1 > c1, 2 * (y_now_1 - c1) + c1**2,
+                                                 y_now_1**2)
+                            l1_now *= torch.where(y_now_1 > 0., b1, 1.)
                         l1_now = torch.mean(l1_now)
                     else:
                         l1_now = torch.tensor(0.)
