@@ -45,15 +45,11 @@ class QuantileLoss:
         return torch.mean(torch.abs(weights * self._weights * (input - target)))
 
 
-# TODO: allow negative loss ratio?
-# TODO: allow fixed lambda reg?
-# TODO: first no drop_edge, then drop_edge?
 # TODO: freeze the embedding network
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
-             validation_fraction=0.15, train_loader=None, valid_loader=None, a0=4., b1=0.5, c1=1.,
-             custom_l1=None, rescale_data=False, target_loss_ratio=0., beta_reg=0.5,
-             drop_largest=0., lambda_max_factor=3., initial_max_ratio=0.1, initial_ratio_epochs=10,
-             optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
+             validation_fraction=0.15, train_loader=None, valid_loader=None, rescale_data=False,
+             lambda_reg=0., a0=4., b1=0.5, c1=1., custom_l1=None, drop_largest=0., optimizer='Adam',
+             learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
              learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
              stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
              verbose=True):
@@ -202,23 +198,17 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
         l0_valid_all = []
         l1_valid_all = []
         i_epoch_all = []
-        lambda_reg_all = []
         i_epoch = -1
-        lambda_reg = 0.
         state_dict_cache = []
 
-        while not _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_all, stop_after_epochs,
+        while not _check_convergence(l0_valid_all, l1_valid_all, lambda_reg, stop_after_epochs,
                                      stop_tol, max_epochs):
             i_epoch += 1
             i_epoch_all.append(i_epoch)
-            lambda_reg_all.append(lambda_reg)
             quantile_net_1d.train()
             l0_train = 0.
             l1_train = 0.
-            if i_epoch + 1 <= initial_ratio_epochs:
-                target_loss_ratio_now = min(target_loss_ratio, initial_max_ratio)
-            else:
-                target_loss_ratio_now = target_loss_ratio
+            n_theta_now = 0
             for j, batch_now in enumerate(train_loader):
                 x_now, theta_now = _decode_batch(batch_now, device)
                 if quantile_net_1d.i > 0:
@@ -227,7 +217,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                 else:
                     y_now = quantile_net_1d(x_now, None, return_raw=True)
                 l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
-                if target_loss_ratio_now > 0.:
+                if lambda_reg > 0.:
                     y_now_1 = y_now[1]
                     if drop_largest > 0.:
                         if 0. < drop_largest < 1.:
@@ -243,14 +233,15 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                     l1_now = torch.mean(l1_now)
                 else:
                     l1_now = torch.tensor(0.)
-                loss_now = l0_now + lambda_reg * l1_now
+                loss_now = l0_now * (1 + lambda_reg * l1_now)
                 optimizer.zero_grad()
                 loss_now.backward()
                 optimizer.step()
-                l0_train += l0_now.detach().cpu().numpy() # * theta_now.shape[0]
-                l1_train += l1_now.detach().cpu().numpy() # * theta_now.shape[0]
-            l0_train /= (j + 1)
-            l1_train /= (j + 1)
+                l0_train += l0_now.detach().cpu().numpy() * theta_now.shape[0]
+                l1_train += l1_now.detach().cpu().numpy() * theta_now.shape[0]
+                n_theta_now += theta_now.shape[0]
+            l0_train /= n_theta_now
+            l1_train /= n_theta_now
             assert np.isfinite(l0_train) and np.isfinite(l1_train)
             l0_train_all.append(l0_train)
             l1_train_all.append(l1_train)
@@ -258,6 +249,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             quantile_net_1d.eval()
             l0_valid = 0.
             l1_valid = 0.
+            n_theta_now = 0
             with torch.no_grad():
                 for j, batch_now in enumerate(valid_loader):
                     x_now, theta_now = _decode_batch(batch_now, device)
@@ -267,7 +259,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                     else:
                         y_now = quantile_net_1d(x_now, None, return_raw=True)
                     l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
-                    if target_loss_ratio_now > 0.:
+                    if lambda_reg > 0.:
                         y_now_1 = y_now[1]
                         if drop_largest > 0.:
                             if 0. < drop_largest < 1.:
@@ -284,26 +276,16 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                         l1_now = torch.mean(l1_now)
                     else:
                         l1_now = torch.tensor(0.)
-                    loss_now = l0_now + lambda_reg * l1_now
+                    # loss_now = l0_now * (1 + lambda_reg * l1_now)
                     l0_valid += l0_now.detach().cpu().numpy() * theta_now.shape[0]
                     l1_valid += l1_now.detach().cpu().numpy() * theta_now.shape[0]
-                l0_valid /= len(valid_loader.dataset)
-                l1_valid /= len(valid_loader.dataset)
+                    n_theta_now += theta_now.shape[0]
+                l0_valid /= n_theta_now
+                l1_valid /= n_theta_now
                 assert np.isfinite(l0_valid) and np.isfinite(l1_valid)
                 l0_valid_all.append(l0_valid)
                 l1_valid_all.append(l1_valid)
 
-            if target_loss_ratio_now > 0.:
-                lambda_reg = ((1. - beta_reg) * lambda_reg + beta_reg * target_loss_ratio_now *
-                              l0_valid / l1_valid)
-                i_best_l0 = np.argmin(l0_valid_all)
-                lambda_max = (lambda_max_factor * target_loss_ratio_now * l0_valid_all[i_best_l0] /
-                              l1_valid_all[i_best_l0])
-                if lambda_reg > lambda_max:
-                    warnings.warn(f'lambda_reg exceeds its max value {lambda_max:.5f}, please '
-                                  f'consider increasing lambda_max_factor or reducing '
-                                  f'target_loss_ratio', RuntimeWarning)
-                    lambda_reg = lambda_max
             if return_best_epoch:
                 state_dict_cache.append(deepcopy(quantile_net_1d.state_dict()))
                 if len(state_dict_cache) > stop_after_epochs + 1:
@@ -312,21 +294,21 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             if verbose > 0 and (i_epoch + 1) % verbose == 0:
                 print(f'finished epoch {i_epoch + 1}, l0_train = {l0_train:.5f}, '
                       f'l1_train = {l1_train:.5f}, l0_valid = {l0_valid:.5f}, '
-                      f'l1_valid = {l1_valid:.5f}, next lambda_reg = {lambda_reg:.5f}')
+                      f'l1_valid = {l1_valid:.5f}')
 
         if return_best_epoch:
             i_epoch_cache = i_epoch_all[-len(state_dict_cache):]
             l0_valid_cache = l0_valid_all[-len(state_dict_cache):]
             l1_valid_cache = l1_valid_all[-len(state_dict_cache):]
-            loss_valid_cache = (np.asarray(l0_valid_cache) +
-                                lambda_reg_all[-1] * np.asarray(l1_valid_cache))
+            loss_valid_cache = np.asarray(l0_valid_cache) * (
+                1 + lambda_reg * np.asarray(l1_valid_cache))
             i_best_cache = np.argmin(loss_valid_cache)
             state_dict = state_dict_cache[i_best_cache]
             quantile_net_1d.load_state_dict(state_dict)
             i_epoch = i_epoch_cache[i_best_cache]
         else:
             state_dict = deepcopy(quantile_net_1d.state_dict())
-        # state_dict={k: v.cpu() for k, v in state_dict.items()}
+        # state_dict = {k: v.cpu() for k, v in state_dict.items()}
 
         if verbose > 0:
             print(f'finished training dim {quantile_net_1d.i}, '
@@ -334,7 +316,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                   f'l1_valid_best = {np.asarray(l1_valid_all)[i_epoch]:.5f}')
         return TrainResult(state_dict=state_dict, l0_train=np.asarray(l0_train_all),
                            l1_train=np.asarray(l1_train_all), l0_valid=np.asarray(l0_valid_all),
-                           l1_valid=np.asarray(l1_valid_all), lambda_reg=np.asarray(lambda_reg_all),
+                           l1_valid=np.asarray(l1_valid_all), lambda_reg=lambda_reg,
                            i_epoch=i_epoch)
 
     else:
@@ -354,14 +336,14 @@ def _decode_batch(batch_now, device):
         raise ValueError
 
 
-def _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_all, stop_after_epochs, stop_tol,
+def _check_convergence(l0_valid_all, l1_valid_all, lambda_reg, stop_after_epochs, stop_tol,
                        max_epochs):
     if len(l0_valid_all) >= max_epochs:
         return True
     elif len(l0_valid_all) <= stop_after_epochs:
         return False
     else:
-        loss_all = np.asarray(l0_valid_all) + lambda_reg_all[-1] * np.asarray(l1_valid_all)
+        loss_all = np.asarray(l0_valid_all) * (1 + lambda_reg * np.asarray(l1_valid_all))
         # if np.nanmin(loss_all[:-stop_after_epochs]) <= np.nanmin(loss_all[-stop_after_epochs:]):
         if loss_all[-(stop_after_epochs + 1)] <= (1 + stop_tol) * np.nanmin(
             loss_all[-stop_after_epochs:]):
