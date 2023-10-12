@@ -11,12 +11,13 @@ __all__ = ['MLP', 'QuantileNet1D', 'QuantileInterp1D', 'QuantileNet', 'get_quant
 
 def _set_cdfs_pred(cdfs_pred):
     if isinstance(cdfs_pred, int):
+        assert cdfs_pred >= 2
         cdfs_pred = np.linspace(0, 1, cdfs_pred + 1)[1:-1]
     else:
         try:
             cdfs_pred = np.asarray(cdfs_pred, dtype=float).reshape(-1)
-            assert np.all(cdfs_pred > 0.)
-            assert np.all(cdfs_pred < 1.)
+            assert np.all(cdfs_pred >= 0.)
+            assert np.all(cdfs_pred <= 1.)
             assert np.all(np.diff(cdfs_pred) > 0.)
         except Exception:
             raise ValueError
