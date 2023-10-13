@@ -48,11 +48,10 @@ class QuantileLoss:
 # TODO: freeze the embedding network
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, rescale_data=False,
-             lambda_reg=0., a0=4., l1_pivot=0.5, custom_l1=None, optimizer='Adam',
-             learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
-             learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
-             stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
-             verbose=True):
+             a0=4., lambda_reg=0., custom_l1=None, optimizer='Adam', learning_rate=5e-4,
+             optimizer_kwargs=None, scheduler='StepLR', learning_rate_decay_period=5,
+             learning_rate_decay_gamma=0.9, scheduler_kwargs=None, stop_after_epochs=20,
+             stop_tol=1e-4, max_epochs=200, return_best_epoch=True, verbose=True):
     if isinstance(quantile_net_1d, _QuantileInterp1D): # for the first dim without x, no nn required
         if theta is not None:
             theta = np.asarray(theta, dtype=np.float64)
@@ -163,8 +162,9 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                                           sigma_theta=sigma_theta)
 
         loss = QuantileLoss(quantile_net_1d.cdfs_pred, a0, device=device)
-        # cdfs_c = np.concatenate([[0.], quantile_net_1d.cdfs_pred, [1.]])
-        # cdfs_c = torch.as_tensor(0.5 * (cdfs_c[:-1] + cdfs_c[1:]), dtype=torch.float)
+        cdfs_01 = np.concatenate([[0.], quantile_net_1d.cdfs_pred, [1.]])
+        log_dcdf = torch.log(
+            torch.as_tensor(cdfs_01[1:] - cdfs_01[:-1], dtype=torch.float)).to(device)
 
         if isinstance(optimizer, type) and issubclass(optimizer, torch.optim.Optimizer):
             optimizer = optimizer(quantile_net_1d.parameters(), **optimizer_kwargs)
@@ -222,9 +222,17 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                     if custom_l1 is not None:
                         l1_now = custom_l1(y_now_1)
                     else:
-                        y_now_1 -= torch.quantile(y_now_1, l1_pivot, dim=-1, keepdim=True)
-                        l1_now = torch.where(y_now_1 < 0., y_now_1**2, 0.)
-                        l1_now = torch.mean(l1_now[torch.where(l1_now > 0.)])
+                        assert log_dcdf.shape[0] >= 3
+                        logp_bin = log_dcdf - y_now_1
+                        logp_bin_c = logp_bin[..., 1:-1]
+                        logp_bin_l = logp_bin[..., :-2]
+                        logp_bin_r = logp_bin[..., 2:]
+                        logp_bin_lr = torch.concat((logp_bin_l[None], logp_bin_r[None]), axis=0)
+                        logp_bin_max = torch.max(logp_bin_lr, axis=0)[0]
+                        logp_bin_mean = torch.mean(logp_bin_lr, axis=0)
+                        l1_now = torch.where(logp_bin_c > logp_bin_max,
+                                             (logp_bin_c - logp_bin_mean.detach())**2, 0.)
+                        l1_now = torch.mean(torch.sum(l1_now, axis=-1))
                 else:
                     l1_now = torch.tensor(0.)
                 loss_now = l0_now * (1 + lambda_reg * l1_now)
@@ -258,9 +266,17 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                         if custom_l1 is not None:
                             l1_now = custom_l1(y_now_1)
                         else:
-                            y_now_1 -= torch.quantile(y_now_1, l1_pivot, dim=-1, keepdim=True)
-                            l1_now = torch.where(y_now_1 < 0., y_now_1**2, 0.)
-                            l1_now = torch.mean(l1_now[torch.where(l1_now > 0.)])
+                            assert log_dcdf.shape[0] >= 3
+                            logp_bin = log_dcdf - y_now_1
+                            logp_bin_c = logp_bin[..., 1:-1]
+                            logp_bin_l = logp_bin[..., :-2]
+                            logp_bin_r = logp_bin[..., 2:]
+                            logp_bin_lr = torch.concat((logp_bin_l[None], logp_bin_r[None]), axis=0)
+                            logp_bin_max = torch.max(logp_bin_lr, axis=0)[0]
+                            logp_bin_mean = torch.mean(logp_bin_lr, axis=0)
+                            l1_now = torch.where(logp_bin_c > logp_bin_max,
+                                                 (logp_bin_c - logp_bin_mean.detach())**2, 0.)
+                            l1_now = torch.mean(torch.sum(l1_now, axis=-1))
                     else:
                         l1_now = torch.tensor(0.)
                     # loss_now = l0_now * (1 + lambda_reg * l1_now)
