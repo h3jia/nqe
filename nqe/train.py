@@ -48,7 +48,7 @@ class QuantileLoss:
 # TODO: freeze the embedding network
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, rescale_data=False,
-             a0=4., lambda_reg=0., custom_l1=None, optimizer='Adam', learning_rate=5e-4,
+             a0=4., lambda_reg=0., f1=0.75, custom_l1=None, optimizer='Adam', learning_rate=5e-4,
              optimizer_kwargs=None, scheduler='StepLR', learning_rate_decay_period=5,
              learning_rate_decay_gamma=0.9, scheduler_kwargs=None, stop_after_epochs=20,
              stop_tol=1e-4, max_epochs=200, return_best_epoch=True, verbose=True):
@@ -229,9 +229,11 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                         logp_bin_r = logp_bin[..., 2:]
                         logp_bin_lr = torch.concat((logp_bin_l[None], logp_bin_r[None]), axis=0)
                         logp_bin_max = torch.max(logp_bin_lr, axis=0)[0]
-                        logp_bin_mean = torch.mean(logp_bin_lr, axis=0)
-                        l1_now = torch.where(logp_bin_c > logp_bin_max,
-                                             (logp_bin_c - logp_bin_mean.detach())**2, 0.)
+                        logp_bin_min = torch.min(logp_bin_lr, axis=0)[0]
+                        logp_bin_mean = torch.log(f1 * torch.exp(logp_bin_max) +
+                                                  (1 - f1) * torch.exp(logp_bin_min))
+                        l1_now = torch.where(logp_bin_c > logp_bin_mean,
+                                             (logp_bin_c - logp_bin_mean)**2, 0.)
                         l1_now = torch.mean(torch.sum(l1_now, axis=-1))
                 else:
                     l1_now = torch.tensor(0.)
@@ -273,9 +275,11 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                             logp_bin_r = logp_bin[..., 2:]
                             logp_bin_lr = torch.concat((logp_bin_l[None], logp_bin_r[None]), axis=0)
                             logp_bin_max = torch.max(logp_bin_lr, axis=0)[0]
-                            logp_bin_mean = torch.mean(logp_bin_lr, axis=0)
-                            l1_now = torch.where(logp_bin_c > logp_bin_max,
-                                                 (logp_bin_c - logp_bin_mean.detach())**2, 0.)
+                            logp_bin_min = torch.min(logp_bin_lr, axis=0)[0]
+                            logp_bin_mean = torch.log(f1 * torch.exp(logp_bin_max) +
+                                                      (1 - f1) * torch.exp(logp_bin_min))
+                            l1_now = torch.where(logp_bin_c > logp_bin_mean,
+                                                 (logp_bin_c - logp_bin_mean)**2, 0.)
                             l1_now = torch.mean(torch.sum(l1_now, axis=-1))
                     else:
                         l1_now = torch.tensor(0.)
