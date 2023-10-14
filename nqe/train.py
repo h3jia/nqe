@@ -39,22 +39,26 @@ class QuantileLoss:
             raise RuntimeError
         weights = torch.where(target > input, self.cdfs_pred, 1. - self.cdfs_pred)
         results_raw = torch.abs(weights * (input - target)) # (# of points, # of cdfs)
-        if 0. < p0 < 1.:
+        if not (p0 == 1. and p0_weights is None):
             n0 = int(p0 * results_raw.shape[-1])
-            if 0 < n0 < results_raw.shape[-1]:
-                if p0_weights is None:
-                    p0_weights = torch.ones_like(self.cdfs_pred)
-                p0_weights = torch.as_tensor(p0_weights).detach().to(self.device)
-                i0 = torch.multinomial(p0_weights, n0, replacement=p0_replacement)
+            if p0_weights is None:
+                p0_weights = torch.ones_like(self.cdfs_pred)
+            p0_weights = torch.as_tensor(p0_weights).detach().to(self.device)
+            i0 = torch.multinomial(p0_weights, n0, replacement=p0_replacement)
+            if i0.ndim == 1:
                 results_raw = results_raw[..., i0]
+            elif i0.ndim == 2:
+                results_raw = torch.gather(results_raw, 1, i0)
+            else:
+                raise RuntimeError(f'i0.ndim should be 1 or 2 instead of {i0.ndim}')
         return torch.mean(results_raw)
 
 
 # TODO: freeze the embedding network
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, rescale_data=False,
-             p0=1., f0=0., p0_weights=None, p0_replacement=True, lambda_reg=0., f1=0.75,
-             custom_l1=None, optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None,
+             p0=1., f0=0., p0_weights=None, p0_replacement=True, p0_batch_avg=True, lambda_reg=0.,
+             f1=0.75, custom_l1=None, optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None,
              scheduler='StepLR', learning_rate_decay_period=5, learning_rate_decay_gamma=0.9,
              scheduler_kwargs=None, stop_after_epochs=20, stop_tol=1e-4, max_epochs=200,
              return_best_epoch=True, verbose=True):
@@ -222,10 +226,13 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                                             return_raw=True)
                 else:
                     y_now = quantile_net_1d(x_now, None, return_raw=True)
-                if 0. < p0 < 1. and p0_weights is None:
+                if not (p0 == 1. and p0_weights is None):
                     p0_weights_now = torch.exp(log_dcdf) / torch.softmax(y_now[1], axis=-1)
-                    p0_weights_now = torch.mean(
-                        0.5 * (p0_weights_now[..., 1:] + p0_weights_now[..., :-1]), axis=0)**(-f0)
+                    p0_weights_now = 0.5 * (p0_weights_now[..., 1:] + p0_weights_now[..., :-1])
+                    if p0_batch_avg:
+                        p0_weights_now = torch.mean(p0_weights_now, axis=0)**(-f0)
+                    else:
+                        p0_weights_now = p0_weights_now**(-f0)
                 l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i], p0=p0,
                               p0_weights=p0_weights_now, p0_replacement=p0_replacement)
                 if lambda_reg > 0.:
