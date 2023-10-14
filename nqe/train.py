@@ -20,18 +20,14 @@ class QuantileLoss:
         interval ``[0, 1]`` into ``cdfs_pred`` bins and therefore fit the evenly spaced
         ``cdfs_pred - 1`` quantiles between ``0`` (exclusive) and ``1`` (exclusive). Otherwise,
         should be in ascending order, larger than 0, and smaller than 1. Set to ``16`` by default.
-    a0 : float, optional
-        Each term in the loss will be weighted by ``exp(a0 * abs(cdf - 0.5))``. Set to ``0.`` by
-        default.
     device : str, optional
         The device on which you train the model. Set to ``'cpu'`` by default.
     """
-    def __init__(self, cdfs_pred, a0=4., device='cpu'):
+    def __init__(self, cdfs_pred, device='cpu'):
         self.cdfs_pred = torch.as_tensor(_set_cdfs_pred(cdfs_pred), dtype=torch.float).to(device)
-        self.a0 = float(a0)
-        self._weights = (torch.exp(self.a0 * torch.abs(self.cdfs_pred - 0.5))[None]).to(device)
+        self.device = device
 
-    def __call__(self, input, target):
+    def __call__(self, input, target, p0=1., p0_weights=None, p0_replacement=True):
         # in_now shape: # of points, (# of data dims + # of previous theta dims)
         # input = model(in_now) shape: # of points, # of cdfs
         # target = out_now shape: # of points
@@ -42,16 +38,26 @@ class QuantileLoss:
         else:
             raise RuntimeError
         weights = torch.where(target > input, self.cdfs_pred, 1. - self.cdfs_pred)
-        return torch.mean(torch.abs(weights * self._weights * (input - target)))
+        results_raw = torch.abs(weights * (input - target)) # (# of points, # of cdfs)
+        if 0. < p0 < 1.:
+            n0 = int(p0 * results_raw.shape[-1])
+            if 0 < n0 < results_raw.shape[-1]:
+                if p0_weights is None:
+                    p0_weights = torch.ones_like(self.cdfs_pred)
+                p0_weights = torch.as_tensor(p0_weights).detach().to(self.device)
+                i0 = torch.multinomial(p0_weights, n0, replacement=p0_replacement)
+                results_raw = results_raw[..., i0]
+        return torch.mean(results_raw)
 
 
 # TODO: freeze the embedding network
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, rescale_data=False,
-             a0=4., lambda_reg=0., f1=0.75, custom_l1=None, optimizer='Adam', learning_rate=5e-4,
-             optimizer_kwargs=None, scheduler='StepLR', learning_rate_decay_period=5,
-             learning_rate_decay_gamma=0.9, scheduler_kwargs=None, stop_after_epochs=20,
-             stop_tol=1e-4, max_epochs=200, return_best_epoch=True, verbose=True):
+             p0=1., f0=0., p0_weights=None, p0_replacement=True, lambda_reg=0., f1=0.75,
+             custom_l1=None, optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None,
+             scheduler='StepLR', learning_rate_decay_period=5, learning_rate_decay_gamma=0.9,
+             scheduler_kwargs=None, stop_after_epochs=20, stop_tol=1e-4, max_epochs=200,
+             return_best_epoch=True, verbose=True):
     if isinstance(quantile_net_1d, _QuantileInterp1D): # for the first dim without x, no nn required
         if theta is not None:
             theta = np.asarray(theta, dtype=np.float64)
@@ -161,7 +167,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             quantile_net_1d.set_rescaling(mu_x=mu_x, sigma_x=sigma_x, mu_theta=mu_theta,
                                           sigma_theta=sigma_theta)
 
-        loss = QuantileLoss(quantile_net_1d.cdfs_pred, a0, device=device)
+        loss = QuantileLoss(quantile_net_1d.cdfs_pred, device=device)
         cdfs_01 = np.concatenate([[0.], quantile_net_1d.cdfs_pred, [1.]])
         log_dcdf = torch.log(
             torch.as_tensor(cdfs_01[1:] - cdfs_01[:-1], dtype=torch.float)).to(device)
@@ -216,14 +222,18 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                                             return_raw=True)
                 else:
                     y_now = quantile_net_1d(x_now, None, return_raw=True)
-                l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
+                if 0. < p0 < 1. and p0_weights is None:
+                    p0_weights_now = torch.exp(log_dcdf) / torch.softmax(y_now[1], axis=-1)
+                    p0_weights_now = torch.mean(
+                        0.5 * (p0_weights_now[..., 1:] + p0_weights_now[..., :-1]), axis=0)**(-f0)
+                l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i], p0=p0,
+                              p0_weights=p0_weights_now, p0_replacement=p0_replacement)
                 if lambda_reg > 0.:
-                    y_now_1 = y_now[1]
                     if custom_l1 is not None:
-                        l1_now = custom_l1(y_now_1)
+                        l1_now = custom_l1(y_now[1])
                     else:
                         assert log_dcdf.shape[0] >= 3
-                        logp_bin = log_dcdf - y_now_1
+                        logp_bin = log_dcdf - y_now[1]
                         logp_bin_c = logp_bin[..., 1:-1]
                         logp_bin_l = logp_bin[..., :-2]
                         logp_bin_r = logp_bin[..., 2:]
@@ -264,12 +274,11 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                         y_now = quantile_net_1d(x_now, None, return_raw=True)
                     l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
                     if lambda_reg > 0.:
-                        y_now_1 = y_now[1]
                         if custom_l1 is not None:
-                            l1_now = custom_l1(y_now_1)
+                            l1_now = custom_l1(y_now[1])
                         else:
                             assert log_dcdf.shape[0] >= 3
-                            logp_bin = log_dcdf - y_now_1
+                            logp_bin = log_dcdf - y_now[1]
                             logp_bin_c = logp_bin[..., 1:-1]
                             logp_bin_l = logp_bin[..., :-2]
                             logp_bin_r = logp_bin[..., 2:]
