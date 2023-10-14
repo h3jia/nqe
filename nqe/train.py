@@ -264,12 +264,12 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                             torch.concat((np.log(f1) + logp_bin_max[None],
                                           np.log(1. - f1) + logp_bin_min[None]),
                                          axis=0), axis=0)
-                    elif f1 == 1.:
-                        logp_bin_mean = logp_bin_max
-                    elif f1 == 0.:
-                        logp_bin_mean = logp_bin_min
+                    elif f1 >= 1.:
+                        logp_bin_mean = np.log(f1) + logp_bin_max
+                    elif f1 <= 0.:
+                        logp_bin_mean = np.log(1. - f1) + logp_bin_min
                     else:
-                        raise ValueError(f'f1 should be in [0., 1.], instead of {f1}')
+                        raise ValueError(f'invalid value f1 = {f1}')
                     # logp_bin_mean = torch.log(f1 * torch.exp(logp_bin_max) +
                     #                           (1 - f1) * torch.exp(logp_bin_min))
                     l1_now = torch.where(logp_bin_c > logp_bin_mean,
@@ -320,12 +320,12 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                                 torch.concat((np.log(f1) + logp_bin_max[None],
                                               np.log(1. - f1) + logp_bin_min[None]),
                                              axis=0), axis=0)
-                        elif f1 == 1.:
-                            logp_bin_mean = logp_bin_max
-                        elif f1 == 0.:
-                            logp_bin_mean = logp_bin_min
+                        elif f1 >= 1.:
+                            logp_bin_mean = np.log(f1) + logp_bin_max
+                        elif f1 <= 0.:
+                            logp_bin_mean = np.log(1. - f1) + logp_bin_min
                         else:
-                            raise ValueError(f'f1 should be in [0., 1.], instead of {f1}')
+                            raise ValueError(f'invalid value f1 = {f1}')
                         # logp_bin_mean = torch.log(f1 * torch.exp(logp_bin_max) +
                         #                           (1 - f1) * torch.exp(logp_bin_min))
                         l1_now = torch.where(logp_bin_c > logp_bin_mean,
