@@ -63,7 +63,7 @@ class QuantileLoss:
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, rescale_data=False,
              p0=1., f0=0., p0_weights=None, p0_replacement=True, p0_batch_avg=True,
-             p0_after_epochs=10, lambda_reg=0., f1=0.75, custom_l1=None, l1_after_epochs=10,
+             p0_after_epochs=10, lambda_reg=0., f1=1.1, f2=0.8, custom_l1=None, l1_after_epochs=10,
              optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
              learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
              stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
@@ -258,20 +258,23 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                     logp_bin_r = logp_bin[..., 2:]
                     logp_bin_lr = torch.concat((logp_bin_l[None], logp_bin_r[None]), axis=0)
                     logp_bin_max = torch.max(logp_bin_lr, axis=0)[0]
-                    logp_bin_min = torch.min(logp_bin_lr, axis=0)[0]
-                    if 0. < f1 < 1.:
-                        logp_bin_mean = torch.logsumexp(
-                            torch.concat((np.log(f1) + logp_bin_max[None],
-                                          np.log(1. - f1) + logp_bin_min[None]),
-                                         axis=0), axis=0)
-                    elif f1 >= 1.:
-                        logp_bin_mean = np.log(f1) + logp_bin_max
-                    elif f1 <= 0.:
-                        logp_bin_mean = np.log(1. - f1) + logp_bin_min
-                    else:
-                        raise ValueError(f'invalid value f1 = {f1}')
+                    # logp_bin_min = torch.min(logp_bin_lr, axis=0)[0]
+                    # if 0. < f1 < 1.:
+                    #     logp_bin_mean = torch.logsumexp(
+                    #         torch.concat((np.log(f1) + logp_bin_max[None],
+                    #                       np.log(1. - f1) + logp_bin_min[None]),
+                    #                      axis=0), axis=0)
+                    # elif f1 >= 1.:
+                    #     logp_bin_mean = np.log(f1) + logp_bin_max
+                    # elif f1 <= 0.:
+                    #     logp_bin_mean = np.log(1. - f1) + logp_bin_min
+                    # else:
+                    #     raise ValueError(f'invalid value f1 = {f1}')
                     # logp_bin_mean = torch.log(f1 * torch.exp(logp_bin_max) +
                     #                           (1 - f1) * torch.exp(logp_bin_min))
+                    logp_bin_mean = torch.clip(np.log(0.5 * f1) + torch.logsumexp(logp_bin_lr,
+                                                                                  axis=0),
+                                               np.log(f2) + logp_bin_max, None)
                     l1_now = torch.where(logp_bin_c > logp_bin_mean,
                                          (logp_bin_c - logp_bin_mean)**2, 0.)
                     l1_now = torch.mean(torch.sum(l1_now, axis=-1))
@@ -314,20 +317,23 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                         logp_bin_r = logp_bin[..., 2:]
                         logp_bin_lr = torch.concat((logp_bin_l[None], logp_bin_r[None]), axis=0)
                         logp_bin_max = torch.max(logp_bin_lr, axis=0)[0]
-                        logp_bin_min = torch.min(logp_bin_lr, axis=0)[0]
-                        if 0. < f1 < 1.:
-                            logp_bin_mean = torch.logsumexp(
-                                torch.concat((np.log(f1) + logp_bin_max[None],
-                                              np.log(1. - f1) + logp_bin_min[None]),
-                                             axis=0), axis=0)
-                        elif f1 >= 1.:
-                            logp_bin_mean = np.log(f1) + logp_bin_max
-                        elif f1 <= 0.:
-                            logp_bin_mean = np.log(1. - f1) + logp_bin_min
-                        else:
-                            raise ValueError(f'invalid value f1 = {f1}')
+                        # logp_bin_min = torch.min(logp_bin_lr, axis=0)[0]
+                        # if 0. < f1 < 1.:
+                        #     logp_bin_mean = torch.logsumexp(
+                        #         torch.concat((np.log(f1) + logp_bin_max[None],
+                        #                       np.log(1. - f1) + logp_bin_min[None]),
+                        #                      axis=0), axis=0)
+                        # elif f1 >= 1.:
+                        #     logp_bin_mean = np.log(f1) + logp_bin_max
+                        # elif f1 <= 0.:
+                        #     logp_bin_mean = np.log(1. - f1) + logp_bin_min
+                        # else:
+                        #     raise ValueError(f'invalid value f1 = {f1}')
                         # logp_bin_mean = torch.log(f1 * torch.exp(logp_bin_max) +
                         #                           (1 - f1) * torch.exp(logp_bin_min))
+                        logp_bin_mean = torch.clip(np.log(0.5 * f1) + torch.logsumexp(logp_bin_lr,
+                                                                                      axis=0),
+                                                   np.log(f2) + logp_bin_max, None)
                         l1_now = torch.where(logp_bin_c > logp_bin_mean,
                                              (logp_bin_c - logp_bin_mean)**2, 0.)
                         l1_now = torch.mean(torch.sum(l1_now, axis=-1))
