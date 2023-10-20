@@ -140,7 +140,7 @@ class Interp1D:
 
     def pdf(self, x, broadening_factor=None):
         if self._ok:
-            if broadening_factor is not None:
+            if broadening_factor is not None and broadening_factor != 1.:
                 return self.broaden(broadening_factor).pdf(x=x)
             else:
                 return pdf(self.configs, x)
@@ -149,7 +149,7 @@ class Interp1D:
 
     def cdf(self, x, local=False, broadening_factor=None):
         if self._ok:
-            if broadening_factor is not None:
+            if broadening_factor is not None and broadening_factor != 1.:
                 return self.broaden(broadening_factor).cdf(x=x, local=local)
             else:
                 return cdf(self.configs, x, local)
@@ -158,7 +158,7 @@ class Interp1D:
 
     def ppf(self, y, broadening_factor=None):
         if self._ok:
-            if broadening_factor is not None:
+            if broadening_factor is not None and broadening_factor != 1.:
                 return self.broaden(broadening_factor).ppf(y=y)
             else:
                 return ppf(self.configs, y)
@@ -167,7 +167,7 @@ class Interp1D:
 
     def sample(self, n=1, random_seed=None, sobol=True, i=None, d=None, broadening_factor=None):
         if self._ok:
-            if broadening_factor is not None:
+            if broadening_factor is not None and broadening_factor != 1.:
                 return self.broaden(broadening_factor).sample(n=n, random_seed=random_seed,
                                                               sobol=sobol, i=i, d=d)
             else:

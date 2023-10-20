@@ -613,6 +613,7 @@ class _QuantileInterp1D(QuantileInterp1D, nn.Module):
                                   split_threshold=self.split_threshold)
 
 
+# TODO: fall back to prior when extreme values make softmax fail
 class QuantileNet(nn.ModuleList):
     """
     List of individual 1-dim conditional quantile networks.
