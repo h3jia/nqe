@@ -63,11 +63,11 @@ class QuantileLoss:
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, rescale_data=False,
              p0=1., f0=0., p0_weights=None, p0_replacement=True, p0_batch_avg=True,
-             p0_after_epochs=10, lambda_reg=0., f1=1.1, f2=0.8, custom_l1=None, l1_after_epochs=10,
-             optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
-             learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
-             stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
-             verbose=True):
+             p0_after_epochs=0, lambda_reg=0., f1=1.1, f2=0.8, f3=10., custom_l1=None,
+             l1_after_epochs=0, optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None,
+             scheduler='StepLR', learning_rate_decay_period=5, learning_rate_decay_gamma=0.9,
+             scheduler_kwargs=None, stop_after_epochs=20, stop_tol=1e-4, max_epochs=200,
+             return_best_epoch=True, verbose=True):
     if isinstance(quantile_net_1d, _QuantileInterp1D): # for the first dim without x, no nn required
         if theta is not None:
             theta = np.asarray(theta, dtype=np.float64)
@@ -275,9 +275,11 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                     logp_bin_mean = torch.clip(np.log(0.5 * f1) + torch.logsumexp(logp_bin_lr,
                                                                                   axis=0),
                                                np.log(f2) + logp_bin_max, None)
-                    l1_now = torch.where(logp_bin_c > logp_bin_mean,
-                                         (logp_bin_c - logp_bin_mean)**2, 0.)
-                    l1_now = torch.mean(torch.sum(l1_now, axis=-1))
+                    _tmp = torch.abs(torch.diff(logp_bin, axis=-1)) - f3
+                    l1_1 = torch.where(_tmp > 0., _tmp**2, 0.)
+                    _tmp = logp_bin_c - logp_bin_mean
+                    l1_2 = torch.where(_tmp > 0., _tmp**2, 0.)
+                    l1_now = torch.mean(torch.sum(l1_1, axis=-1) + torch.sum(l1_2, axis=-1))
                 loss_now = l0_now * (1 + lambda_reg_now * l1_now) if lambda_reg_now else l0_now
                 optimizer.zero_grad()
                 loss_now.backward()
@@ -334,9 +336,11 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                         logp_bin_mean = torch.clip(np.log(0.5 * f1) + torch.logsumexp(logp_bin_lr,
                                                                                       axis=0),
                                                    np.log(f2) + logp_bin_max, None)
-                        l1_now = torch.where(logp_bin_c > logp_bin_mean,
-                                             (logp_bin_c - logp_bin_mean)**2, 0.)
-                        l1_now = torch.mean(torch.sum(l1_now, axis=-1))
+                        _tmp = torch.abs(torch.diff(logp_bin, axis=-1)) - f3
+                        l1_1 = torch.where(_tmp > 0., _tmp**2, 0.)
+                        _tmp = logp_bin_c - logp_bin_mean
+                        l1_2 = torch.where(_tmp > 0., _tmp**2, 0.)
+                        l1_now = torch.mean(torch.sum(l1_1, axis=-1) + torch.sum(l1_2, axis=-1))
                     # loss_now = l0_now * (1 + lambda_reg_now * l1_now)
                     l0_valid += l0_now.detach().cpu().numpy() * theta_now.shape[0]
                     l1_valid += l1_now.detach().cpu().numpy() * theta_now.shape[0]
