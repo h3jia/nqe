@@ -928,16 +928,17 @@ cdef void _get_config(const double[::1] knots, const double[::1] cdfs, double[:,
 
     if n_m == 2:
         configs[I_TYPES, 0] = LINEAR
-        configs[I_DYDXS, 0] = (cdfs[1] - cdfs[0]) / (knots[1] - knots[0])
+        configs[I_DYDXS, 0] = (configs[I_CDFS, 1] - configs[I_CDFS, 0]) / (configs[I_KNOTS, 1] -
+                                                                           configs[I_KNOTS, 0])
         configs[I_DYDXS, 1] = configs[I_DYDXS, 0]
 
     elif n_m == 3:
         configs[I_TYPES, 0] = LEFT_END_CUBIC
         configs[I_TYPES, 1] = RIGHT_END_CUBIC
-        h0 = knots[1] - knots[0]
-        h1 = knots[2] - knots[1]
-        m0 = (cdfs[1] - cdfs[0]) / h0
-        m1 = (cdfs[2] - cdfs[1]) / h1
+        h0 = configs[I_KNOTS, 1] - configs[I_KNOTS, 0]
+        h1 = configs[I_KNOTS, 2] - configs[I_KNOTS, 1]
+        m0 = (configs[I_CDFS, 1] - configs[I_CDFS, 0]) / h0
+        m1 = (configs[I_CDFS, 2] - configs[I_CDFS, 1]) / h1
         configs[I_DYDXS, 0] = m0
         configs[I_DYDXS, 1] = _get_dydx_2(h0, h1, m0, m1)
         configs[I_DYDXS, 2] = m1
