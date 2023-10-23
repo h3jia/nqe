@@ -41,6 +41,7 @@ ctypedef struct cdf_params:
 
 cdef double XTOL = 1e-8, RTOL = 1e-8, WIDTH_FACTOR = 1., NOT_WIDE_OFFSET = 1e8
 cdef double EPS_DPDX_EXPA = 1e-8, EXP_CUBIC_THRESHOLD = 0.6, TAIL_MASS_FACTOR = 0.999
+cdef double MIN_BIN_WIDTH = 5e-6
 cdef int MITR = 300
 cdef int UNDEFINED = 0, NORMAL_CUBIC = 1, LEFT_END_CUBIC = 2, RIGHT_END_CUBIC = 3, LINEAR = 4
 cdef int DOUBLE_EXP = 5, LEFT_END_EXP = 6, RIGHT_END_EXP = 7 #, MERGE_EXP = 8
@@ -886,6 +887,24 @@ def _ppf_n_n(const double[:, :, ::1] configs, double[::1] xs, const double[::1] 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
+cdef void _check_width(double[:, ::1] configs, int n_m) nogil:
+    cdef size_t i
+    cdef double full_width = configs[0, n_m - 1] - configs[0, 0]
+    for i in range(n_m):
+        configs[2, i] = 0.
+    for i in range(1, n_m - 2):
+        if configs[0, i + 1] - configs[0, i] < full_width * MIN_BIN_WIDTH:
+            configs[2, i] = 1.
+            configs[2, i + 1] = 1.
+    if n_m >= 3 and configs[0, 1] - configs[0, 0] < full_width * MIN_BIN_WIDTH:
+        configs[2, 1] = 1.
+    if n_m >= 3 and configs[0, n_m - 1] - configs[0, n_m - 2] < full_width * MIN_BIN_WIDTH:
+        configs[2, n_m - 2] = 1.
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+@cython.cdivision(True)
 cdef void _get_config(const double[::1] knots, const double[::1] cdfs, double[:, ::1] configs,
                       int n_2, double p_tail_limit, double split_threshold=1e-2) nogil:
     cdef size_t i
@@ -893,10 +912,19 @@ cdef void _get_config(const double[::1] knots, const double[::1] cdfs, double[:,
     cdef size_t[4] i_all = [0, 1, n_m - 3, n_m - 2]
     cdef size_t[4] i_all_2 = [0, 1, n_m - 4, n_m - 3]
     cdef double h0, h1, m0, m1
+
     configs[I_KNOTS] = knots
     configs[I_CDFS] = cdfs
     configs[I_CDFS, 0] = 0.
     configs[I_CDFS, n_m - 1] = 1.
+
+    _check_width(configs, n_m)
+    for i in range(n_m):
+        while configs[2, i] > 0.:
+            _remove_flagged(configs, i, n_m)
+    for i in range(n_m):
+        configs[2, i] = nan
+    n_m = _get_n_m(configs[I_KNOTS], n_m)
 
     if n_m == 2:
         configs[I_TYPES, 0] = LINEAR
@@ -1002,20 +1030,20 @@ cdef void _broaden_interval(const double[::1] config_knots, const double[::1] co
     if not left_double:
         cache_knots[i0] = config_knots[i0]
         cache_cdfs[i0] = config_cdfs[i0]
-        cache_flags[i0] = 0
+        cache_flags[i0] = 0.
     if not right_double:
         cache_knots[i1 + 1] = config_knots[i1 + 1]
         cache_cdfs[i1 + 1] = config_cdfs[i1 + 1]
-        cache_flags[i1 + 1] = 0
+        cache_flags[i1 + 1] = 0.
     for i in range(i0 + 1, i1 + 1):
         cache_knots[i] = xc + broadening_factor * (config_knots[i] - xc)
         cache_cdfs[i] = config_cdfs[i]
-        cache_flags[i] = 0
+        cache_flags[i] = 0.
     for i in range(i0 + 1, i1 + 1):
         if cache_knots[i] >= xc:
             break
         elif cache_knots[i] <= x0:
-            cache_flags[i] = 1
+            cache_flags[i] = 1.
             left_removed = config_cdfs[i + 1] - config_cdfs[i0 + 1]
         elif (
             (config_cdfs[i0 + 1] - y0) / (cache_knots[i] - x0) > TAIL_MASS_FACTOR *
@@ -1031,7 +1059,7 @@ cdef void _broaden_interval(const double[::1] config_knots, const double[::1] co
         if cache_knots[i] <= xc:
             break
         elif cache_knots[i] >= x1:
-            cache_flags[i] = 1
+            cache_flags[i] = 1.
             right_removed = config_cdfs[i1] - config_cdfs[i - 1]
         elif (
             (y1 - config_cdfs[i1]) / (x1 - cache_knots[i]) > TAIL_MASS_FACTOR *
@@ -1056,53 +1084,53 @@ cdef void _broaden_interval(const double[::1] config_knots, const double[::1] co
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef void _remove_broaden_flagged(double[:, ::1] broaden_cache, int i, int n_m) nogil:
+cdef void _remove_flagged(double[:, ::1] flagged_cache, int i, int n_m) nogil:
     cdef size_t j, k
     for j in range(i, n_m - 1):
         for k in range(3):
-            broaden_cache[k, j] = broaden_cache[k, j + 1]
+            flagged_cache[k, j] = flagged_cache[k, j + 1]
     for k in range(3):
-        broaden_cache[k, n_m - 1] = nan
+        flagged_cache[k, n_m - 1] = nan
 
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
-cdef void _broaden_config(const double[:, ::1] configs, int n_2, double[:, ::1] broaden_cache,
+cdef void _broaden_config(const double[:, ::1] configs, int n_2, double[:, ::1] flagged_cache,
                           double broadening_factor) nogil:
     cdef size_t i, i0 = 0, i1
     cdef int n_m = _get_n_m(configs[I_KNOTS], n_2), left_double = 0, right_double = 0
     if n_m == 2:
-        broaden_cache[:2, :2] = configs[:2, :2]
-        broaden_cache[2, 0] = 0
-        broaden_cache[2, 1] = 0
+        flagged_cache[:2, :2] = configs[:2, :2]
+        flagged_cache[2, 0] = 0.
+        flagged_cache[2, 1] = 0.
     elif n_m >= 3:
         for i in range(n_m - 1):
             if iround(configs[I_TYPES, i]) == DOUBLE_EXP:
                 i1 = i
                 right_double = 1
-                _broaden_interval(configs[I_KNOTS], configs[I_CDFS], broaden_cache[0],
-                                  broaden_cache[1], broaden_cache[2], i0, i1, left_double,
+                _broaden_interval(configs[I_KNOTS], configs[I_CDFS], flagged_cache[0],
+                                  flagged_cache[1], flagged_cache[2], i0, i1, left_double,
                                   right_double, broadening_factor)
                 i0 = i
                 left_double = 1
             elif iround(configs[I_TYPES, i]) == RIGHT_END_EXP or i == n_m - 2:
                 i1 = i
                 right_double = 0
-                _broaden_interval(configs[I_KNOTS], configs[I_CDFS], broaden_cache[0],
-                                  broaden_cache[1], broaden_cache[2], i0, i1, left_double,
+                _broaden_interval(configs[I_KNOTS], configs[I_CDFS], flagged_cache[0],
+                                  flagged_cache[1], flagged_cache[2], i0, i1, left_double,
                                   right_double, broadening_factor)
                 break
     for i in range(n_m):
-        while broaden_cache[2, i] > 0:
-            _remove_broaden_flagged(broaden_cache, i, n_m)
+        while flagged_cache[2, i] > 0.:
+            _remove_flagged(flagged_cache, i, n_m)
 
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
 @cython.cdivision(True)
 def _broaden_configs(const double[:, :, ::1] configs, int n_0, int n_2,
-                     double[:, :, ::1] broaden_cache, double broadening_factor):
+                     double[:, :, ::1] flagged_cache, double broadening_factor):
     cdef size_t i
     for i in prange(n_0, nogil=True, schedule='static'):
-        _broaden_config(configs[i], n_2, broaden_cache[i], broadening_factor)
+        _broaden_config(configs[i], n_2, flagged_cache[i], broadening_factor)
