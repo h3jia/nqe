@@ -1,0 +1,3 @@
+include nqe/_interp.pyx
+
+global-exclude *.c
