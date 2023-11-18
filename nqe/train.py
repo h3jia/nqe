@@ -62,8 +62,8 @@ class QuantileLoss:
 # TODO: freeze the embedding network
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, rescale_data=False,
-             p0=1., f0=0., p0_weights=None, p0_replacement=True, p0_batch_avg=True,
-             p0_after_epochs=0, lambda_reg=0., f1=1.1, f2=0.8, custom_l1=None, l1_after_epochs=0,
+             p0=0.5, f0=1., p0_weights=None, p0_replacement=False, p0_batch_avg=False,
+             p0_after_epochs=0, lambda_reg=0.1, f1=1.1, f2=0.8, custom_l1=None, l1_after_epochs=0,
              optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='DelayedStepLR',
              learning_rate_decay_delay=0, learning_rate_decay_period=5,
              learning_rate_decay_gamma=0.9, scheduler_kwargs=None, stop_after_epochs=20,
@@ -248,6 +248,8 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                             p0_weights_now = torch.mean(p0_weights_now, axis=0)**(-f0)
                         else:
                             p0_weights_now = p0_weights_now**(-f0)
+                    else:
+                        p0_weights_now = p0_weights
                 else:
                     p0_now = 1.
                     p0_weights_now = None
