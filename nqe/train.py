@@ -64,10 +64,10 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, rescale_data=False,
              p0=1., f0=0., p0_weights=None, p0_replacement=True, p0_batch_avg=True,
              p0_after_epochs=0, lambda_reg=0., f1=1.1, f2=0.8, custom_l1=None, l1_after_epochs=0,
-             optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='StepLR',
-             learning_rate_decay_period=5, learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
-             stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
-             verbose=True):
+             optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='DelayedStepLR',
+             learning_rate_decay_delay=0, learning_rate_decay_period=5,
+             learning_rate_decay_gamma=0.9, scheduler_kwargs=None, stop_after_epochs=20,
+             stop_tol=1e-4, max_epochs=200, return_best_epoch=True, verbose=True):
     if isinstance(quantile_net_1d, _QuantileInterp1D): # for the first dim without x, no nn required
         if theta is not None:
             theta = np.asarray(theta, dtype=np.float64)
@@ -183,7 +183,8 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
         log_dcdf = torch.log(dcdf)
 
         if isinstance(optimizer, type) and issubclass(optimizer, torch.optim.Optimizer):
-            optimizer = optimizer(quantile_net_1d.parameters(), **optimizer_kwargs)
+            optimizer = optimizer(quantile_net_1d.parameters(), lr=learning_rate,
+                                  **optimizer_kwargs)
         elif isinstance(optimizer, torch.optim.Optimizer):
             pass
         elif isinstance(optimizer, str):
@@ -198,11 +199,14 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             scheduler = scheduler(optimizer, **scheduler_kwargs)
         elif isinstance(scheduler, torch.optim.lr_scheduler.LRScheduler):
             pass
-        elif scheduler == 'StepLR':
-            scheduler = torch.optim.lr_scheduler.StepLR(
-                optimizer, step_size=learning_rate_decay_period, gamma=learning_rate_decay_gamma,
-                verbose=False
+        elif scheduler == 'DelayedStepLR':
+            lr_lambda = lambda x: (
+                1. if (x < learning_rate_decay_delay or
+                       (x - learning_rate_decay_delay) % learning_rate_decay_period)
+                else learning_rate_decay_gamma
             )
+            scheduler = torch.optim.lr_scheduler.MultiplicativeLR(optimizer, lr_lambda=lr_lambda,
+                                                                  verbose=False)
         elif isinstance(scheduler, str):
             scheduler = eval('torch.optim.lr_scheduler.' + optimizer)
             scheduler = scheduler(optimizer, **scheduler_kwargs)
