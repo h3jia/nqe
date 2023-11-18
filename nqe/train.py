@@ -67,7 +67,8 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='DelayedStepLR',
              learning_rate_decay_delay=0, learning_rate_decay_period=5,
              learning_rate_decay_gamma=0.9, scheduler_kwargs=None, stop_after_epochs=20,
-             stop_tol=1e-4, max_epochs=200, return_best_epoch=True, verbose=True):
+             stop_tol=1e-4, max_epochs=200, return_best_epoch=True, cache_in_cpu=False,
+             verbose=True):
     if isinstance(quantile_net_1d, _QuantileInterp1D): # for the first dim without x, no nn required
         if theta is not None:
             theta = np.asarray(theta, dtype=np.float64)
@@ -355,7 +356,10 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                 l1_valid_all.append(l1_valid)
 
             if return_best_epoch:
-                state_dict_cache.append(deepcopy(quantile_net_1d.state_dict()))
+                state_dict_now = quantile_net_1d.state_dict()
+                if cache_in_cpu:
+                    state_dict_now = {k: v.cpu() for k, v in state_dict_now.items()}
+                state_dict_cache.append(deepcopy(state_dict_now))
                 if len(state_dict_cache) > stop_after_epochs + 1:
                     state_dict_cache = state_dict_cache[-(stop_after_epochs + 1):]
             scheduler.step()
@@ -376,7 +380,8 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             i_epoch = i_epoch_cache[i_best_cache]
         else:
             state_dict = deepcopy(quantile_net_1d.state_dict())
-        # state_dict = {k: v.cpu() for k, v in state_dict.items()}
+        if cache_in_cpu:
+            state_dict = {k: v.to(device) for k, v in state_dict.items()}
 
         if verbose > 0:
             print(f'finished training dim {quantile_net_1d.i}, '
