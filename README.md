@@ -23,4 +23,5 @@ Coming soon, please check back later.
 If you find NQE useful for your research, please consider citing our papers accordingly:
 
 * He Jia,
-*Simulation-Based Inference with Quantile Regression*
+*Simulation-Based Inference with Quantile Regression*,
+[2401.02413](https://arxiv.org/abs/2401.02413)
