@@ -59,11 +59,13 @@ class QuantileLoss:
         return torch.mean(results_raw)
 
 
+# NOTE: p0_batch_avg is a bit tricky with multi gpus, removed for now
+# NOTE: p0_after_epochs and l1_after_epochs seem not quite useful, removed for now
 # TODO: freeze the embedding network
 def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
              validation_fraction=0.15, train_loader=None, valid_loader=None, rescale_data=False,
-             p0=0.5, f0=1., p0_weights=None, p0_replacement=False, p0_batch_avg=False,
-             p0_after_epochs=0, lambda_reg=0.1, f1=1.1, f2=0.8, custom_l1=None, l1_after_epochs=0,
+             p0=0.5, f0=1., p0_weights=None, p0_replacement=False,
+             lambda_reg=0.1, f1=1.1, f2=0.8, custom_l1=None,
              optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='DelayedStepLR',
              learning_rate_decay_delay=0, learning_rate_decay_period=5,
              learning_rate_decay_gamma=0.9, scheduler_kwargs=None, stop_after_epochs=20,
@@ -227,7 +229,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                                      stop_tol, max_epochs):
             i_epoch += 1
             i_epoch_all.append(i_epoch)
-            lambda_reg_now = lambda_reg if i_epoch >= l1_after_epochs else 0.
+            lambda_reg_now = lambda_reg # if i_epoch >= l1_after_epochs else 0.
             quantile_net_1d.train()
             l0_train = 0.
             l1_train = 0.
@@ -239,20 +241,22 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                                             return_raw=True)
                 else:
                     y_now = quantile_net_1d(x_now, None, return_raw=True)
-                if i_epoch >= p0_after_epochs:
-                    p0_now = p0
-                    if not (p0 == 1. and f0 == 0. and p0_weights is None):
-                        p0_weights_now = dcdf / torch.softmax(y_now[1], axis=-1)
-                        p0_weights_now = 0.5 * (p0_weights_now[..., 1:] + p0_weights_now[..., :-1])
-                        if p0_batch_avg:
-                            p0_weights_now = torch.mean(p0_weights_now, axis=0)**(-f0)
-                        else:
-                            p0_weights_now = p0_weights_now**(-f0)
-                    else:
-                        p0_weights_now = p0_weights
+
+                # if i_epoch >= p0_after_epochs:
+                p0_now = p0
+                if not (p0 == 1. and f0 == 0. and p0_weights is None):
+                    p0_weights_now = dcdf / torch.softmax(y_now[1], axis=-1)
+                    p0_weights_now = 0.5 * (p0_weights_now[..., 1:] + p0_weights_now[..., :-1])
+                    # if p0_batch_avg:
+                    #     p0_weights_now = torch.mean(p0_weights_now, axis=0)**(-f0)
+                    # else:
+                    p0_weights_now = p0_weights_now**(-f0)
                 else:
-                    p0_now = 1.
-                    p0_weights_now = None
+                    p0_weights_now = p0_weights
+                # else:
+                #     p0_now = 1.
+                #     p0_weights_now = None
+
                 l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i], p0=p0_now,
                               p0_weights=p0_weights_now, p0_replacement=p0_replacement)
                 if custom_l1 is not None:
