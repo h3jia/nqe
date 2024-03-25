@@ -178,3 +178,20 @@ class Interp1D:
     def broaden(self, broadening_factor=1.1):
         return Interp1D(configs=broaden(self.configs, broadening_factor, self.p_tail_limit,
                                         self.split_threshold))
+
+    @staticmethod
+    def _check_merge_list(merge_list):
+        assert hasattr(merge_list, '__iter__') and len(merge_list) > 0
+        assert all([isinstance(_, Interp1D) for _ in merge_list])
+        assert all([_._ok for _ in merge_list])
+        assert np.unique([_.p_tail_limit for _ in merge_list]).size == 1
+        assert np.unique([_.split_threshold for _ in merge_list]).size == 1
+        assert np.unique([_.configs.shape[2] for _ in merge_list]).size == 1
+        # TODO: n_bin indeed does not need to be the same
+
+    @classmethod
+    def merge(cls, merge_list):
+        cls._check_merge_list(merge_list)
+        return cls(p_tail_limit=merge_list[0].p_tail_limit,
+                   split_threshold=merge_list[0].split_threshold,
+                   configs=np.concatenate([_.configs for _ in merge_list], axis=0))

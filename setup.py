@@ -61,7 +61,7 @@ with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
 setup(
     name='nqe',
     # version='0.1.0.dev1',
-    version='0.1.0.dev1+' + git_version()[:7],
+    version='0.1.0.dev2+' + git_version()[:7],
     author='He Jia',
     maintainer='He Jia',
     maintainer_email='he.jia.phy@gmail.com',

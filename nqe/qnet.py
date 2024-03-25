@@ -8,8 +8,14 @@ import warnings
 
 __all__ = ['MLP', 'QuantileNet1D', 'QuantileInterp1D', 'QuantileNet', 'get_quantile_net']
 
+# TODO: revise the name of ref_dist, qm_latent, etc
+
 
 def _set_cdfs_pred(cdfs_pred):
+    """
+    Input: 1-dim array of cdfs_pred, or # of bins
+    Output: 1-dim array of cdfs_pred, excluding 0 and 1 on the edges
+    """
     if isinstance(cdfs_pred, int):
         assert cdfs_pred >= 2
         cdfs_pred = np.linspace(0, 1, cdfs_pred + 1)[1:-1]
@@ -19,6 +25,11 @@ def _set_cdfs_pred(cdfs_pred):
             assert np.all(cdfs_pred >= 0.)
             assert np.all(cdfs_pred <= 1.)
             assert np.all(np.diff(cdfs_pred) > 0.)
+            if cdfs_pred[0] == 0.:
+                cdfs_pred = cdfs_pred[1:]
+            if cdfs_pred[-1] == 1.:
+                cdfs_pred = cdfs_pred[:-1]
+            assert cdfs_pred.size > 0
         except Exception:
             raise ValueError
     return cdfs_pred
@@ -69,6 +80,9 @@ class MLP(nn.Module):
 
     def _make_fc(self, input_neurons, output_neurons, hidden_neurons, activation, batch_norm,
                  shortcut):
+        """
+        Initialize all the fully connected layers in self.__init__, based on the input architecture.
+        """
         if isinstance(activation, nn.Module):
             self.activation = activation
         elif isinstance(activation, str):
@@ -157,7 +171,7 @@ class MLP(nn.Module):
             theta = (theta - self.mu_theta) / self.sigma_theta
             x = theta
         else:
-            raise ValueError
+            raise ValueError("x and theta cannot both be None.")
         x = x.contiguous()
 
         if len(self.fc_layers) == 1:
@@ -276,7 +290,7 @@ class QuantileNet1D(MLP):
                                                                  axis=-1)[..., :-1]
             return (y, x) if return_raw else y
         elif self.quantile_method == 'binary':
-            # EXPERIMENTAL
+            # EXPERIMENTAL, MAY BE REMOVED LATER
             if return_raw:
                 raise NotImplementedError
             x = x.contiguous()
@@ -499,12 +513,12 @@ class QuantileInterp1D(Interp1D):
 
     Parameters
     ----------
-    theta : 1-d array_like of float
-        The first dimension of theta.
-    low : float
-        The lower bound of prior.
-    high : float
-        The upper bound of prior.
+    theta : 1-d array_like of float or None, optional
+        The first dimension of theta. Can only be None if ``configs`` is not None.
+    low : float or None, optional
+        The lower bound of prior. Can only be None if ``configs`` is not None.
+    high : float or None, optional
+        The upper bound of prior. Can only be None if ``configs`` is not None.
     cdfs_pred : int or array_like of float, optional
         The CDFs corresponding to the quantiles you want to predict. If ``int``, will divide the
         interval ``[0, 1]`` into ``cdfs_pred`` bins and therefore fit the evenly spaced
@@ -516,11 +530,16 @@ class QuantileInterp1D(Interp1D):
     split_threshold : float, optional
         The threshold for splitting into two peaks to account for multimodality during the
         interpolation. Set to ``1e-2`` by default.
+    configs : array_like of float or None, optional
+        If not None, will be used to directly initialize the interpolation.
     """
-    def __init__(self, theta, low, high, cdfs_pred=16, p_tail_limit=0.6, split_threshold=1e-2,
-                 configs=None):
+    def __init__(self, theta=None, low=None, high=None, cdfs_pred=16, p_tail_limit=0.6,
+                 split_threshold=1e-2, configs=None):
         self.i = 0
         if configs is None:
+            assert theta is not None
+            assert low is not None
+            assert high is not None
             if isinstance(theta, torch.Tensor):
                 theta = theta.detach().cpu().numpy()
             cdfs_pred = _set_cdfs_pred(cdfs_pred)
@@ -532,7 +551,8 @@ class QuantileInterp1D(Interp1D):
                 split_threshold=split_threshold
             )
         else:
-            super(QuantileInterp1D, self).__init__(configs=configs)
+            super(QuantileInterp1D, self).__init__(p_tail_limit=p_tail_limit,
+                                                   split_threshold=split_threshold, configs=configs)
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
                batch_size=None, device='cpu', broadening_factor=None):
@@ -611,6 +631,13 @@ class _QuantileInterp1D(QuantileInterp1D, nn.Module):
         QuantileInterp1D.__init__(self, theta=theta, low=self.low, high=self.high,
                                   cdfs_pred=self.cdfs_pred, p_tail_limit=self.p_tail_limit,
                                   split_threshold=self.split_threshold)
+
+    @classmethod
+    def merge(cls, merge_list):
+        cls._check_merge_list(merge_list)
+        return QuantileInterp1D(p_tail_limit=merge_list[0].p_tail_limit,
+                                split_threshold=merge_list[0].split_threshold,
+                                configs=np.concatenate([_.configs for _ in merge_list], axis=0))
 
 
 # TODO: fall back to prior when extreme values make softmax fail
