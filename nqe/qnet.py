@@ -332,7 +332,7 @@ class QuantileNet1D(MLP):
                         split_threshold=self.split_threshold)
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, d=None, batch_size=None,
-               device='cpu', broadening_factor=None):
+               device='cpu', broadening_factor=None, shift=None):
         random_seed = np.random.default_rng(random_seed)
         i = self.i
         d = 1 if d is None else int(d)
@@ -351,7 +351,7 @@ class QuantileNet1D(MLP):
                                  theta=(theta if (theta is None or theta.shape[0] <= 1) else
                                         theta[(i * batch_size):((i + 1) * batch_size)]),
                                  random_seed=random_seed, sobol=sobol, d=d, batch_size=batch_size,
-                                 device=device, broadening_factor=broadening_factor)
+                                 device=device, broadening_factor=broadening_factor, shift=shift)
                      for i in range(int(np.ceil(n / batch_size)))]
                 )
             else:
@@ -361,11 +361,19 @@ class QuantileNet1D(MLP):
                 if theta is not None:
                     theta = theta.contiguous().to(device)
                 knots_pred = self(x, theta).detach().cpu().numpy()
+                if shift is not None:
+                    shift = np.asarray(shift)
+                    if shift.ndim == 1:
+                        knots_pred += shift
+                    elif shift.ndim == 2:
+                        knots_pred += shift[self.i]
+                    else:
+                        raise ValueError('invalid value for shift.')
                 return self.interp_1d(knots_pred).sample(n=n, random_seed=random_seed, sobol=sobol,
                                                          i=i, d=d,
                                                          broadening_factor=broadening_factor)
 
-    def _f_interp(self, x, theta, batch_size, device, target, **kwargs):
+    def _f_interp(self, x, theta, batch_size, device, target, shift, **kwargs):
         i = self.i
         with torch.no_grad():
             self.to(device)
@@ -385,7 +393,7 @@ class QuantileNet1D(MLP):
                                     theta=(theta if (theta is None or theta.shape[0] <= 1) else
                                            theta[(i * batch_size):((i + 1) * batch_size)]),
                                     batch_size=batch_size, device=device, target=target,
-                                    **kwargs)
+                                    shift=shift, **kwargs)
                      for i in range(int(np.ceil(theta.shape[0] / batch_size)))]
                 )
             else:
@@ -400,39 +408,56 @@ class QuantileNet1D(MLP):
                     raise RuntimeError('invalid value for i.')
                 theta_now = theta[:, i].detach().cpu().numpy().astype(np.float64)
                 knots_pred = self(x, theta_prev).detach().cpu().numpy().astype(np.float64)
+                if shift is not None:
+                    shift = np.asarray(shift)
+                    if shift.ndim == 1:
+                        knots_pred += shift
+                    elif shift.ndim == 2:
+                        knots_pred += shift[self.i]
+                    else:
+                        raise ValueError('invalid value for shift.')
                 if target == 'pdf':
                     return self.interp_1d(knots_pred).pdf(x=theta_now, **kwargs)
                 elif target == 'cdf':
                     return self.interp_1d(knots_pred).cdf(x=theta_now, **kwargs)
+                elif target == 'knots_pred':
+                    return knots_pred
                 else:
                     raise ValueError('invalid value for target.')
 
-    def pdf(self, x=None, theta=None, batch_size=None, device='cpu', broadening_factor=None):
+    def pdf(self, x=None, theta=None, batch_size=None, device='cpu', broadening_factor=None,
+            shift=None):
         return self._f_interp(x=x, theta=theta, batch_size=batch_size, device=device, target='pdf',
-                              broadening_factor=broadening_factor)
+                              broadening_factor=broadening_factor, shift=shift)
 
     def cdf(self, x=None, theta=None, local=False, batch_size=None, device='cpu',
-            broadening_factor=None):
+            broadening_factor=None, shift=None):
         return self._f_interp(x=x, theta=theta, batch_size=batch_size, device=device, target='cdf',
-                              local=local, broadening_factor=broadening_factor)
+                              local=local, broadening_factor=broadening_factor, shift=shift)
+
+    def knots_pred(self, x=None, theta=None, batch_size=None, device='cpu', broadening_factor=None,
+                   shift=None):
+        return self._f_interp(x=x, theta=theta, batch_size=batch_size, device=device,
+                              target='knots_pred', broadening_factor=broadening_factor, shift=shift)
 
     def qm_latent(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
-                  broadening_factor=None):
+                  broadening_factor=None, shift=None):
         if qm_method.lower() == 'cdf':
             return self.cdf(x=x, theta=theta, local=False, batch_size=batch_size, device=device,
-                            broadening_factor=broadening_factor)
+                            broadening_factor=broadening_factor, shift=shift)
         elif qm_method.lower() == 'cdf_local':
             return self.cdf(x=x, theta=theta, local=True, batch_size=batch_size, device=device,
-                            broadening_factor=broadening_factor)
+                            broadening_factor=broadening_factor, shift=shift)
         else:
             raise NotImplementedError('currently only cdf and cdf_local are implemented for '
                                       'ref_dist.')
 
     def qm_rank(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
-                broadening_factor=None, qm_latent=None, ref_dist='gaussian'):
+                broadening_factor=None, shift=None, qm_latent=None, ref_dist='gaussian'):
         if qm_latent is None:
             qm_latent = self.qm_latent(x=x, theta=theta, qm_method=qm_method, batch_size=batch_size,
-                                       device=device, broadening_factor=broadening_factor)
+                                       device=device, broadening_factor=broadening_factor,
+                                       shift=shift)
         if isinstance(ref_dist, str) and ref_dist.lower() == 'gaussian':
             return chi2.cdf(norm.ppf(qm_latent)**2, df=1)
         else:
@@ -555,7 +580,9 @@ class QuantileInterp1D(Interp1D):
                                                    split_threshold=split_threshold, configs=configs)
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, i=None, d=None,
-               batch_size=None, device='cpu', broadening_factor=None):
+               batch_size=None, device='cpu', broadening_factor=None, shift=None):
+        if shift is not None:
+            raise NotImplementedError
         return Interp1D.sample(self, n=n, random_seed=random_seed, sobol=sobol, i=i, d=d,
                                broadening_factor=broadening_factor)
 
@@ -576,17 +603,24 @@ class QuantileInterp1D(Interp1D):
             raise ValueError('invalid value for theta.')
         return theta
 
-    def pdf(self, x=None, theta=None, batch_size=None, device='cpu', broadening_factor=None):
+    def pdf(self, x=None, theta=None, batch_size=None, device='cpu', broadening_factor=None,
+            shift=None):
+        if shift is not None:
+            raise NotImplementedError
         theta = self._check_theta(theta)
         return Interp1D.pdf(self, x=theta, broadening_factor=broadening_factor)
 
     def cdf(self, x=None, theta=None, local=False, batch_size=None, device='cpu',
-            broadening_factor=None):
+            broadening_factor=None, shift=None):
+        if shift is not None:
+            raise NotImplementedError
         theta = self._check_theta(theta)
         return Interp1D.cdf(self, x=theta, local=local, broadening_factor=broadening_factor)
 
     def qm_latent(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
-                  broadening_factor=None):
+                  broadening_factor=None, shift=None):
+        if shift is not None:
+            raise NotImplementedError
         if qm_method.lower() == 'cdf':
             return self.cdf(x=x, theta=theta, local=False, batch_size=batch_size, device=device,
                             broadening_factor=broadening_factor)
@@ -598,7 +632,9 @@ class QuantileInterp1D(Interp1D):
                                       'ref_dist.')
 
     def qm_rank(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
-                broadening_factor=None, qm_latent=None, ref_dist='gaussian'):
+                broadening_factor=None, shift=None, qm_latent=None, ref_dist='gaussian'):
+        if shift is not None:
+            raise NotImplementedError
         if qm_latent is None:
             qm_latent = self.qm_latent(x=x, theta=theta, qm_method=qm_method, batch_size=batch_size,
                                        device=device, broadening_factor=broadening_factor)
@@ -661,7 +697,7 @@ class QuantileNet(nn.ModuleList):
         return True
 
     def sample(self, n=1, x=None, theta=None, random_seed=None, sobol=True, batch_size=None,
-               device='cpu', broadening_factor=None):
+               device='cpu', broadening_factor=None, shift=None):
         # theta is not used
         n, x, _ = _check_n_x_theta(n, x, None)
         random_seed = np.random.default_rng(random_seed)
@@ -676,37 +712,42 @@ class QuantileNet(nn.ModuleList):
                                     x[(i * batch_size):((i + 1) * batch_size)]),
                                  theta=None, random_seed=random_seed, sobol=sobol,
                                  batch_size=batch_size, device=device,
-                                 broadening_factor=broadening_factor)
+                                 broadening_factor=broadening_factor, shift=shift)
                      for i in range(int(np.ceil(n / batch_size)))]
                 )
             else:
                 theta_all = self[0].sample(n=n, x=x, random_seed=random_seed, sobol=sobol,
                                            d=len(self), batch_size=batch_size, device=device,
-                                           broadening_factor=broadening_factor)[:, None]
+                                           broadening_factor=broadening_factor,
+                                           shift=shift)[:, None]
                 for i in range(1, len(self)):
                     theta_now = self[i].sample(n=n, x=x, theta=theta_all, random_seed=random_seed,
                                                sobol=sobol, d=len(self), batch_size=batch_size,
-                                               device=device,
-                                               broadening_factor=broadening_factor)[: None]
+                                               device=device, broadening_factor=broadening_factor,
+                                               shift=shift)[: None]
                     theta_all = np.concatenate((theta_all, theta_now[:, None]), axis=1)
                 return theta_all
 
-    def pdf(self, x=None, theta=None, batch_size=None, device='cpu', broadening_factor=None):
+    def pdf(self, x=None, theta=None, batch_size=None, device='cpu', broadening_factor=None,
+            shift=None):
         return np.prod([s.pdf(x=x, theta=theta, batch_size=batch_size, device=device,
-                              broadening_factor=broadening_factor) for s in self], axis=0)
+                              broadening_factor=broadening_factor, shift=shift) for s in self],
+                       axis=0)
 
     def qm_latent(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
-                  broadening_factor=None):
+                  broadening_factor=None, shift=None):
         return np.concatenate([s.qm_latent(x=x, theta=theta, qm_method=qm_method,
                                            batch_size=batch_size, device=device,
-                                           broadening_factor=broadening_factor)[:, None]
+                                           broadening_factor=broadening_factor,
+                                           shift=shift)[:, None]
                                for s in self], axis=1)
 
     def qm_rank(self, x=None, theta=None, qm_method='cdf_local', batch_size=None, device='cpu',
-                broadening_factor=None, qm_latent=None, ref_dist='gaussian'):
+                broadening_factor=None, shift=None, qm_latent=None, ref_dist='gaussian'):
         if qm_latent is None:
             qm_latent = self.qm_latent(x=x, theta=theta, qm_method=qm_method, batch_size=batch_size,
-                                       device=device, broadening_factor=broadening_factor)
+                                       device=device, broadening_factor=broadening_factor,
+                                       shift=shift)
         if isinstance(ref_dist, str) and ref_dist.lower() == 'gaussian':
             return chi2.cdf(np.sum(norm.ppf(qm_latent)**2, axis=1), df=len(self))
         else:

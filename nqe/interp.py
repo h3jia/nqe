@@ -124,6 +124,7 @@ def sample(configs, n=1, random_seed=None, sobol=True, i=None, d=None):
 def broaden(configs, broadening_factor=1.1, p_tail_limit=0.6, split_threshold=1e-2):
     flagged_cache = np.full((configs.shape[0], 3, configs.shape[2]), np.nan, dtype=np.float64)
     _broaden_configs(configs, configs.shape[0], configs.shape[2], flagged_cache, broadening_factor)
+    # TODO: recover the original number of bins
     return get_configs(knots=flagged_cache[:, 0, :], cdfs=flagged_cache[:, 1, :],
                        p_tail_limit=p_tail_limit, split_threshold=split_threshold)
 
