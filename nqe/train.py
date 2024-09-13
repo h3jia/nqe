@@ -1,10 +1,14 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from copy import deepcopy
 from collections import namedtuple
 import warnings
 from .qnet import _set_cdfs_pred, _QuantileInterp1D, QuantileNet1D
+import os
+import datetime
 
 __all__ = ['QuantileLoss', 'train_1d', 'TrainResult']
 
@@ -47,7 +51,8 @@ class QuantileLoss:
             try:
                 i0 = torch.multinomial(p0_weights, n0, replacement=p0_replacement)
             except Exception:
-                warnings.warn('p0 multinomial sampling failed, trying equal weights for now')
+                warnings.warn('p0 multinomial sampling failed, trying equal weights for now',
+                              RuntimeWarning)
                 i0 = torch.multinomial(torch.ones_like(self.cdfs_pred).detach().to(self.device),
                                        n0, replacement=p0_replacement)
             if i0.ndim == 1:
@@ -59,19 +64,24 @@ class QuantileLoss:
         return torch.mean(results_raw)
 
 
-# NOTE: p0_batch_avg is a bit tricky with multi gpus, removed for now
+# NOTE: p0_batch_avg is a bit tricky with multiple gpus, removed for now
 # NOTE: p0_after_epochs and l1_after_epochs seem not quite useful, removed for now
-# TODO: freeze the embedding network
-def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
-             validation_fraction=0.15, train_loader=None, valid_loader=None, rescale_data=False,
+# TODO: freeze the embedding network (?)
+def train_1d(quantile_net_1d, device='cpu', save_path=None, save_period=5,
+             x=None, theta=None, batch_size=100, validation_fraction=0.15,
+             train_loader=None, valid_loader=None, rescale_data=False,
              p0=0.5, f0=1., p0_weights=None, p0_replacement=False,
              lambda_reg=0.1, f1=1.1, f2=0.8, custom_l1=None,
-             optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None, scheduler='DelayedStepLR',
-             learning_rate_decay_delay=0, learning_rate_decay_period=5,
-             learning_rate_decay_gamma=0.9, scheduler_kwargs=None, stop_after_epochs=20,
-             stop_tol=1e-4, max_epochs=200, return_best_epoch=True, cache_in_cpu=False,
+             optimizer='Adam', learning_rate=5e-4, optimizer_kwargs=None,
+             scheduler='DelayedStepLR', learning_rate_decay_delay=0, learning_rate_decay_period=5,
+             learning_rate_decay_gamma=0.9, scheduler_kwargs=None,
+             stop_after_epochs=20, stop_tol=1e-4, max_epochs=200, return_best_epoch=True,
              verbose=True):
     if isinstance(quantile_net_1d, _QuantileInterp1D): # for the first dim without x, no nn required
+        if dist.is_initialized():
+            warnings.warn('for now, with torch.distributed each rank will evaluate a separate '
+                          'QuantileInterp1D and the model will not be synced across different '
+                          'ranks.', RuntimeWarning)
         if theta is not None:
             theta = np.asarray(theta, dtype=np.float64)
             assert theta.ndim == 2
@@ -93,12 +103,29 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             raise ValueError("you didn't give me the data for training.")
         quantile_net_1d.fit(theta_0)
         if verbose:
-            print(f'finished fitting the emperical quantiles for dim 0')
-        return TrainResult(state_dict=quantile_net_1d.configs, l0_train=None, l1_train=None,
-                           l0_valid=None, l1_valid=None, lambda_reg=None, i_epoch=None)
+            print(f'[{datetime.datetime.now()}]  finished fitting the emperical quantiles for '
+                  f'dim 0', flush=True)
+        return TrainResult(best_state=quantile_net_1d.configs, last_state=quantile_net_1d.configs,
+                           lambda_reg=None, l0_train=None, l1_train=None, l0_valid=None,
+                           l1_valid=None)
 
-    elif isinstance(quantile_net_1d, QuantileNet1D):
-        quantile_net_1d.to(device)
+    elif isinstance(quantile_net_1d, QuantileNet1D) or isinstance(quantile_net_1d, DDP):
+        if isinstance(quantile_net_1d, QuantileNet1D):
+            quantile_net_1d.to(device)
+            model = quantile_net_1d
+            model_local = quantile_net_1d
+            if dist.is_initialized():
+                warnings.warn('quantile_net_1d should be a DDP model for proper distributed '
+                              'training.', RuntimeWarning)
+        elif isinstance(quantile_net_1d, DDP):
+            model = quantile_net_1d
+            model_local = quantile_net_1d.module
+            if not dist.is_initialized():
+                warnings.warn('quantile_net_1d is a DDP model but distributed training has not been'
+                              ' initialized.', RuntimeWarning)
+        else:
+            raise RuntimeError
+
         if verbose is True:
             verbose = 5
         elif verbose is False:
@@ -110,6 +137,9 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
         if scheduler_kwargs is None:
             scheduler_kwargs = {}
         if theta is not None:
+            if dist.is_initialized():
+                warnings.warn('if you want to correctly use multiple GPUs with torch.distributed, '
+                              'please directly give me the data loader.', RuntimeWarning)
             theta = torch.as_tensor(theta)
             if not theta.ndim == 2:
                 raise ValueError
@@ -155,6 +185,9 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                 raise ValueError("you didn't give me the data for training.")
 
         if rescale_data:
+            if dist.is_initialized():
+                warnings.warn('for now the rescaling parameters will not be synced between multiple'
+                              ' GPUs.', RuntimeWarning)
             mu_x = []
             sigma_x = []
             mu_theta = []
@@ -165,10 +198,10 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                 if x_now is not None:
                     mu_x.append(torch.mean(x_now, dim=0, keepdim=True))
                     sigma_x.append(torch.std(x_now, dim=0, keepdim=True))
-                if quantile_net_1d.i > 0:
-                    mu_theta.append(torch.mean(theta_now[..., :quantile_net_1d.i], dim=0,
+                if model_local.i > 0:
+                    mu_theta.append(torch.mean(theta_now[..., :model_local.i], dim=0,
                                                keepdim=True))
-                    sigma_theta.append(torch.std(theta_now[..., :quantile_net_1d.i], dim=0,
+                    sigma_theta.append(torch.std(theta_now[..., :model_local.i], dim=0,
                                                  keepdim=True))
 
             mu_x = torch.mean(torch.concat(mu_x), dim=0) if len(mu_x) > 0 else None
@@ -177,23 +210,21 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
             sigma_theta = (torch.mean(torch.concat(sigma_theta)**2, dim=0)**0.5 if
                            len(sigma_theta) > 0 else None)
             # print(mu_x, sigma_x, mu_theta, sigma_theta)
-            quantile_net_1d.set_rescaling(mu_x=mu_x, sigma_x=sigma_x, mu_theta=mu_theta,
-                                          sigma_theta=sigma_theta)
+            model_local.set_rescaling(mu_x=mu_x, sigma_x=sigma_x, mu_theta=mu_theta,
+                                      sigma_theta=sigma_theta)
 
-        loss = QuantileLoss(quantile_net_1d.cdfs_pred, device=device)
-        cdfs_01 = np.concatenate([[0.], quantile_net_1d.cdfs_pred, [1.]])
+        loss = QuantileLoss(model_local.cdfs_pred, device=device)
+        cdfs_01 = np.concatenate([[0.], model_local.cdfs_pred, [1.]])
         dcdf = torch.as_tensor(cdfs_01[1:] - cdfs_01[:-1], dtype=torch.float).to(device)
         log_dcdf = torch.log(dcdf)
 
         if isinstance(optimizer, type) and issubclass(optimizer, torch.optim.Optimizer):
-            optimizer = optimizer(quantile_net_1d.parameters(), lr=learning_rate,
-                                  **optimizer_kwargs)
+            optimizer = optimizer(model.parameters(), lr=learning_rate, **optimizer_kwargs)
         elif isinstance(optimizer, torch.optim.Optimizer):
             pass
         elif isinstance(optimizer, str):
             optimizer = eval('torch.optim.' + optimizer)
-            optimizer = optimizer(quantile_net_1d.parameters(), lr=learning_rate,
-                                  **optimizer_kwargs)
+            optimizer = optimizer(model.parameters(), lr=learning_rate, **optimizer_kwargs)
         else:
             raise ValueError
 
@@ -216,31 +247,44 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
         else:
             raise ValueError
 
-        l0_train_all = []
-        l1_train_all = []
-        l0_valid_all = []
-        l1_valid_all = []
-        i_epoch_all = []
-        i_epoch = -1
-        lambda_reg_now = 0.
-        state_dict_cache = []
+        prev_state = _get_prev_state(save_path, device, verbose)
+        if prev_state is None:
+            l0_train = []
+            l1_train = []
+            l0_valid = []
+            l1_valid = []
+            best_state = None
+        else:
+            model_local.load_state_dict(prev_state.last_state.model)
+            optimizer.load_state_dict(prev_state.last_state.optimizer)
+            scheduler.load_state_dict(prev_state.last_state.scheduler)
+            l0_train = list(prev_state.l0_train)
+            l1_train = list(prev_state.l1_train)
+            l0_valid = list(prev_state.l0_valid)
+            l1_valid = list(prev_state.l1_valid)
+            best_state = prev_state.best_state
 
-        while not _check_convergence(l0_valid_all, l1_valid_all, lambda_reg_now, stop_after_epochs,
-                                     stop_tol, max_epochs):
-            i_epoch += 1
-            i_epoch_all.append(i_epoch)
-            lambda_reg_now = lambda_reg # if i_epoch >= l1_after_epochs else 0.
-            quantile_net_1d.train()
-            l0_train = 0.
-            l1_train = 0.
-            n_theta_now = 0
+        if dist.is_initialized():
+            dist.barrier()
+
+        while not _check_convergence(l0_valid, l1_valid, lambda_reg, stop_after_epochs, stop_tol,
+                                     max_epochs):
+            i_epoch = len(l0_valid)
+            if dist.is_initialized():
+                train_loader.sampler.set_epoch(i_epoch)
+                valid_loader.sampler.set_epoch(i_epoch)
+            # lambda_reg_now = lambda_reg if i_epoch >= l1_after_epochs else 0.
+
+            model.train()
+            l0_train_now = torch.tensor(0., device=device)
+            l1_train_now = torch.tensor(0., device=device)
+            n_now = torch.tensor(0, device=device)
             for j, batch_now in enumerate(train_loader):
                 x_now, theta_now = _decode_batch(batch_now, device)
-                if quantile_net_1d.i > 0:
-                    y_now = quantile_net_1d(x_now, theta_now[..., :quantile_net_1d.i],
-                                            return_raw=True)
+                if model_local.i > 0:
+                    y_now = model(x_now, theta_now[..., :model_local.i], return_raw=True)
                 else:
-                    y_now = quantile_net_1d(x_now, None, return_raw=True)
+                    y_now = model(x_now, None, return_raw=True)
 
                 # if i_epoch >= p0_after_epochs:
                 p0_now = p0
@@ -257,7 +301,7 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                 #     p0_now = 1.
                 #     p0_weights_now = None
 
-                l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i], p0=p0_now,
+                l0_now = loss(y_now[0], theta_now[..., model_local.i], p0=p0_now,
                               p0_weights=p0_weights_now, p0_replacement=p0_replacement)
                 if custom_l1 is not None:
                     l1_now = custom_l1(y_now[1])
@@ -289,35 +333,33 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                     _tmp = logp_bin_c - logp_bin_mean
                     l1_2 = torch.where(_tmp > 0., _tmp**2, 0.)
                     l1_now = torch.mean(torch.sum(l1_2, axis=-1))
-                loss_now = l0_now * (1 + lambda_reg_now * l1_now) if lambda_reg_now else l0_now
+                loss_now = l0_now * (1 + lambda_reg * l1_now) if lambda_reg else l0_now
                 optimizer.zero_grad()
                 loss_now.backward()
                 optimizer.step()
-                l0_train += l0_now.detach().cpu().numpy() * theta_now.shape[0]
-                l1_train += l1_now.detach().cpu().numpy() * theta_now.shape[0]
-                n_theta_now += theta_now.shape[0]
-            l0_train /= n_theta_now
-            l1_train /= n_theta_now
-            if not np.isfinite(l0_train):
-                raise RuntimeError(f'l0_train = {l0_train} is not finite')
-            if not np.isfinite(l1_train):
-                raise RuntimeError(f'l1_train = {l1_train} is not finite')
-            l0_train_all.append(l0_train)
-            l1_train_all.append(l1_train)
+                l0_train_now += l0_now.detach() * theta_now.shape[0]
+                l1_train_now += l1_now.detach() * theta_now.shape[0]
+                n_now += theta_now.shape[0]
+            l0_train_now, l1_train_now = _compute_total_loss(l0_train_now, l1_train_now, n_now)
+            if not np.isfinite(l0_train_now):
+                raise RuntimeError(f'l0_train_now = {l0_train_now} is not finite')
+            if not np.isfinite(l1_train_now):
+                raise RuntimeError(f'l1_train_now = {l1_train_now} is not finite')
+            l0_train.append(l0_train_now)
+            l1_train.append(l1_train_now)
 
-            quantile_net_1d.eval()
-            l0_valid = 0.
-            l1_valid = 0.
-            n_theta_now = 0
+            model.eval()
+            l0_valid_now = torch.tensor(0., device=device)
+            l1_valid_now = torch.tensor(0., device=device)
+            n_now = torch.tensor(0, device=device)
             with torch.no_grad():
                 for j, batch_now in enumerate(valid_loader):
                     x_now, theta_now = _decode_batch(batch_now, device)
-                    if quantile_net_1d.i > 0:
-                        y_now = quantile_net_1d(x_now, theta_now[..., :quantile_net_1d.i],
-                                                return_raw=True)
+                    if model_local.i > 0:
+                        y_now = model(x_now, theta_now[..., :model_local.i], return_raw=True)
                     else:
-                        y_now = quantile_net_1d(x_now, None, return_raw=True)
-                    l0_now = loss(y_now[0], theta_now[..., quantile_net_1d.i])
+                        y_now = model(x_now, None, return_raw=True)
+                    l0_now = loss(y_now[0], theta_now[..., model_local.i])
                     if custom_l1 is not None:
                         l1_now = custom_l1(y_now[1])
                     else:
@@ -349,61 +391,95 @@ def train_1d(quantile_net_1d, device='cpu', x=None, theta=None, batch_size=100,
                         l1_2 = torch.where(_tmp > 0., _tmp**2, 0.)
                         l1_now = torch.mean(torch.sum(l1_2, axis=-1))
                     # loss_now = l0_now * (1 + lambda_reg_now * l1_now)
-                    l0_valid += l0_now.detach().cpu().numpy() * theta_now.shape[0]
-                    l1_valid += l1_now.detach().cpu().numpy() * theta_now.shape[0]
-                    n_theta_now += theta_now.shape[0]
-                l0_valid /= n_theta_now
-                l1_valid /= n_theta_now
-                if not np.isfinite(l0_train):
-                    raise RuntimeError(f'l0_train = {l0_train} is not finite')
-                if not np.isfinite(l1_train):
-                    raise RuntimeError(f'l1_train = {l1_train} is not finite')
-                l0_valid_all.append(l0_valid)
-                l1_valid_all.append(l1_valid)
+                    l0_valid_now += l0_now.detach() * theta_now.shape[0]
+                    l1_valid_now += l1_now.detach() * theta_now.shape[0]
+                    n_now += theta_now.shape[0]
+                l0_valid_now, l1_valid_now = _compute_total_loss(l0_valid_now, l1_valid_now, n_now)
+                if not np.isfinite(l0_valid_now):
+                    raise RuntimeError(f'l0_valid_now = {l0_valid_now} is not finite')
+                if not np.isfinite(l1_valid_now):
+                    raise RuntimeError(f'l1_valid_now = {l1_valid_now} is not finite')
+                l0_valid.append(l0_valid_now)
+                l1_valid.append(l1_valid_now)
 
-            if return_best_epoch:
-                state_dict_now = quantile_net_1d.state_dict()
-                if cache_in_cpu:
-                    state_dict_now = {k: v.cpu() for k, v in state_dict_now.items()}
-                state_dict_cache.append(deepcopy(state_dict_now))
-                if len(state_dict_cache) > stop_after_epochs + 1:
-                    state_dict_cache = state_dict_cache[-(stop_after_epochs + 1):]
+            valid_loss = _l0_lambda_l1(l0_valid, l1_valid, lambda_reg)
+            if best_state is None or np.argmin(valid_loss) == valid_loss.size - 1:
+                best_state = deepcopy(FullState(
+                    model={k: v.cpu() for k, v in model_local.state_dict().items()},
+                    optimizer=optimizer.state_dict(),
+                    scheduler=scheduler.state_dict(),
+                ))
+            if (not dist.is_initialized()) or dist.get_rank() == 0:
+                if verbose > 0 and (i_epoch + 1) % verbose == 0:
+                    print(f'[{datetime.datetime.now()}]  finished epoch {i_epoch + 1}, '
+                          f'l0_train = {l0_train_now:.5f}, l1_train = {l1_train_now:.5f}, '
+                          f'l0_valid = {l0_valid_now:.5f}, l1_valid = {l1_valid_now:.5f}',
+                          flush=True)
+                if save_path is not None:
+                    if save_period <= 0 or (i_epoch + 1) % save_period == 0:
+                        last_state = deepcopy(FullState(
+                            model={k: v.cpu() for k, v in model_local.state_dict().items()},
+                            optimizer=optimizer.state_dict(),
+                            scheduler=scheduler.state_dict(),
+                        ))
+                        torch.save(TrainResult(best_state=best_state, last_state=last_state,
+                                               lambda_reg=lambda_reg, l0_train=np.asarray(l0_train),
+                                               l1_train=np.asarray(l1_train),
+                                               l0_valid=np.asarray(l0_valid),
+                                               l1_valid=np.asarray(l1_valid)), save_path + '.tmp')
+                        if os.path.exists(save_path):
+                            os.remove(save_path)
+                        os.rename(save_path + '.tmp', save_path)
             scheduler.step()
-            if verbose > 0 and (i_epoch + 1) % verbose == 0:
-                print(f'finished epoch {i_epoch + 1}, l0_train = {l0_train:.5f}, '
-                      f'l1_train = {l1_train:.5f}, l0_valid = {l0_valid:.5f}, '
-                      f'l1_valid = {l1_valid:.5f}')
 
+        last_state = deepcopy(FullState(
+            model={k: v.cpu() for k, v in model_local.state_dict().items()},
+            optimizer=optimizer.state_dict(),
+            scheduler=scheduler.state_dict(),
+        ))
         if return_best_epoch:
-            i_epoch_cache = i_epoch_all[-len(state_dict_cache):]
-            l0_valid_cache = l0_valid_all[-len(state_dict_cache):]
-            l1_valid_cache = l1_valid_all[-len(state_dict_cache):]
-            loss_valid_cache = np.asarray(l0_valid_cache) * (
-                1 + lambda_reg_now * np.asarray(l1_valid_cache))
-            i_best_cache = np.argmin(loss_valid_cache)
-            state_dict = state_dict_cache[i_best_cache]
-            quantile_net_1d.load_state_dict(state_dict)
-            i_epoch = i_epoch_cache[i_best_cache]
-        else:
-            state_dict = deepcopy(quantile_net_1d.state_dict())
-        if cache_in_cpu:
-            state_dict = {k: v.to(device) for k, v in state_dict.items()}
+            model_local.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+        train_result = TrainResult(best_state=best_state, last_state=last_state,
+                                   lambda_reg=lambda_reg, l0_train=np.asarray(l0_train),
+                                   l1_train=np.asarray(l1_train), l0_valid=np.asarray(l0_valid),
+                                   l1_valid=np.asarray(l1_valid))
 
-        if verbose > 0:
-            print(f'finished training dim {quantile_net_1d.i}, '
-                  f'l0_valid_best = {np.asarray(l0_valid_all)[i_epoch]:.5f}, '
-                  f'l1_valid_best = {np.asarray(l1_valid_all)[i_epoch]:.5f}')
-        return TrainResult(state_dict=state_dict, l0_train=np.asarray(l0_train_all),
-                           l1_train=np.asarray(l1_train_all), l0_valid=np.asarray(l0_valid_all),
-                           l1_valid=np.asarray(l1_valid_all), lambda_reg=lambda_reg_now,
-                           i_epoch=i_epoch)
+        if (not dist.is_initialized()) or dist.get_rank() == 0:
+            if save_path is not None:
+                torch.save(train_result, save_path + '.tmp')
+                if os.path.exists(save_path):
+                    os.remove(save_path)
+                os.rename(save_path + '.tmp', save_path)
+            if verbose > 0:
+                print(f'[{datetime.datetime.now()}]  finished training dim {model_local.i}, '
+                      f'l0_valid_best = {np.asarray(l0_valid)[np.argmin(valid_loss)]:.5f}, '
+                      f'l1_valid_best = {np.asarray(l1_valid)[np.argmin(valid_loss)]:.5f}',
+                      flush=True)
+
+        return train_result
 
     else:
         raise ValueError("I don't know how to train this quantile_net_1d.")
 
 
-TrainResult = namedtuple('TrainResult', ['state_dict', 'l0_train', 'l1_train', 'l0_valid',
-                                         'l1_valid', 'lambda_reg', 'i_epoch'])
+TrainResult = namedtuple('TrainResult', ['best_state', 'last_state', 'lambda_reg',
+                                         'l0_train', 'l1_train', 'l0_valid', 'l1_valid'])
+
+
+FullState = namedtuple('FullState', ['model', 'optimizer', 'scheduler'])
+
+
+def _get_prev_state(save_path, device, verbose):
+    if save_path is None or not os.path.isfile(save_path):
+        if verbose > 0:
+            print(f'[{datetime.datetime.now()}]  did not find previous checkpoint, will train from '
+                  f'scratch.', flush=True)
+        return None
+    else:
+        if verbose > 0:
+            print(f'[{datetime.datetime.now()}]  found previous checkpoint, will resume training '
+                  f'from that.', flush=True)
+        return torch.load(save_path, map_location=device)
 
 
 def _decode_batch(batch_now, device):
@@ -415,17 +491,42 @@ def _decode_batch(batch_now, device):
         raise ValueError
 
 
-def _check_convergence(l0_valid_all, l1_valid_all, lambda_reg, stop_after_epochs, stop_tol,
-                       max_epochs):
-    if len(l0_valid_all) >= max_epochs:
+def _l0_lambda_l1(l0_valid, l1_valid, lambda_reg):
+    return np.asarray(l0_valid) * (1 + lambda_reg * np.asarray(l1_valid))
+
+
+def _check_convergence(l0_valid, l1_valid, lambda_reg, stop_after_epochs, stop_tol, max_epochs):
+    loss = _l0_lambda_l1(l0_valid, l1_valid, lambda_reg)
+    if len(loss) >= max_epochs:
         return True
-    elif len(l0_valid_all) <= stop_after_epochs:
+    elif stop_after_epochs is None or len(loss) <= stop_after_epochs:
         return False
     else:
-        loss_all = np.asarray(l0_valid_all) * (1 + lambda_reg * np.asarray(l1_valid_all))
-        # if np.nanmin(loss_all[:-stop_after_epochs]) <= np.nanmin(loss_all[-stop_after_epochs:]):
-        if loss_all[-(stop_after_epochs + 1)] <= (1 + stop_tol) * np.nanmin(
-            loss_all[-stop_after_epochs:]):
-            return True
-        else:
-            return False
+        return loss[-(stop_after_epochs + 1)] <= (1 + stop_tol) * np.nanmin(
+            loss[-stop_after_epochs:])
+
+
+# def _broadcast_convergence(stop_signal):
+#     # Broadcast the stop signal to all processes
+#     stop_tensor = torch.tensor(int(stop_signal), dtype=torch.int)
+#     dist.broadcast(stop_tensor, src=0)
+#     return stop_tensor.item() == 1
+
+
+# def _check_convergence(l0_valid, l1_valid, lambda_reg, stop_after_epochs, stop_tol, max_epochs):
+#     if (not dist.is_initialized()) or dist.get_rank() == 0:
+#         loss = _get_full_loss(l0_valid, l1_valid, lambda_reg)
+#         stop_signal = _local_convergence(loss, stop_after_epochs, stop_tol, max_epochs)
+#     else:
+#         stop_signal = False
+#     return _broadcast_convergence(stop_signal) if dist.is_initialized() else stop_signal
+
+
+def _compute_total_loss(local_l0, local_l1, local_n):
+    if dist.is_initialized():
+        dist.all_reduce(local_l0, op=dist.ReduceOp.SUM)
+        dist.all_reduce(local_l1, op=dist.ReduceOp.SUM)
+        dist.all_reduce(local_n, op=dist.ReduceOp.SUM)
+    l0 = local_l0 / local_n
+    l1 = local_l1 / local_n
+    return l0.item(), l1.item()

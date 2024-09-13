@@ -130,17 +130,17 @@ class MLP(nn.Module):
             self.sigma_x = torch.std(x, dim=0)
             self.sigma_x = torch.where(self.sigma_x > 0., self.sigma_x, 1e-8).detach()
         if mu_x is not None:
-            self.mu_x = torch.as_tensor(mu_x)
+            self.mu_x = torch.as_tensor(mu_x).detach()
         if sigma_x is not None:
-            self.sigma_x = torch.as_tensor(sigma_x)
+            self.sigma_x = torch.as_tensor(sigma_x).detach()
         if theta is not None:
             self.mu_theta = torch.mean(theta, dim=0).detach()
             self.sigma_theta = torch.std(theta, dim=0)
             self.sigma_theta = torch.where(self.sigma_theta > 0., self.sigma_theta, 1e-8).detach()
         if mu_theta is not None:
-            self.mu_theta = torch.as_tensor(mu_theta)
+            self.mu_theta = torch.as_tensor(mu_theta).detach()
         if sigma_theta is not None:
-            self.sigma_theta = torch.as_tensor(sigma_theta)
+            self.sigma_theta = torch.as_tensor(sigma_theta).detach()
 
     def _forward(self, x=None, theta=None):
         """
@@ -210,6 +210,7 @@ class MLP(nn.Module):
         self.sigma_theta = state_dict['sigma_theta']
 
 
+# NOTE: removed binary_method for now
 class QuantileNet1D(MLP):
     """
     Neural Network to predict the 1-dim quantiles.
@@ -227,11 +228,6 @@ class QuantileNet1D(MLP):
         interval ``[0, 1]`` into ``cdfs_pred`` bins and therefore fit the evenly spaced
         ``cdfs_pred - 1`` quantiles between ``0`` (exclusive) and ``1`` (exclusive). Otherwise,
         should be in ascending order, larger than 0, and smaller than 1. Set to ``16`` by default.
-    quantile_method : str, optional
-        Should be either ``'cumsum'`` or ``'binary'``. Note that ``'binary'`` is not well tested at
-        the moment.
-    binary_depth : int, optional
-        The depth of binary tree. Only used if ``'quantile_method'`` is ``'binary'``.
     p_tail_limit : float, optional
         Lower bound of the tail pdf in the one-side boundary interpolation scheme. Set to ``0.7``
         by default.
@@ -246,8 +242,8 @@ class QuantileNet1D(MLP):
     -----
     See ``MLP`` for the additional parameters, some of which are required by the initializer.
     """
-    def __init__(self, i, low, high, cdfs_pred=16, quantile_method='cumsum', binary_depth=0,
-                 p_tail_limit=0.6, split_threshold=1e-2, **kwargs):
+    def __init__(self, i, low, high, cdfs_pred=16, p_tail_limit=0.6, split_threshold=1e-2,
+                 **kwargs):
         self.cdfs_pred = _set_cdfs_pred(cdfs_pred)
         kwargs['output_neurons'] = self.cdfs_pred.size + 1
         super(QuantileNet1D, self).__init__(**kwargs)
@@ -255,10 +251,10 @@ class QuantileNet1D(MLP):
         self.low = float(low)
         self.high = float(high)
         self.cdfs = np.concatenate([[0.], self.cdfs_pred, [1.]])
-        self.quantile_method = str(quantile_method)
-        if self.quantile_method not in ('cumsum', 'binary'):
-            raise ValueError
-        self.binary_depth = int(binary_depth)
+        # self.quantile_method = str(quantile_method)
+        # if self.quantile_method not in ('cumsum', 'binary'):
+        #     raise ValueError
+        # self.binary_depth = int(binary_depth)
         self.p_tail_limit = float(p_tail_limit)
         self.split_threshold = float(split_threshold)
 
@@ -285,32 +281,9 @@ class QuantileNet1D(MLP):
         network architecture.
         """
         x = self._forward(x, theta)
-        if self.quantile_method == 'cumsum':
-            y = self.low + (self.high - self.low) * torch.cumsum(torch.softmax(x, axis=-1),
-                                                                 axis=-1)[..., :-1]
-            return (y, x) if return_raw else y
-        elif self.quantile_method == 'binary':
-            # EXPERIMENTAL, MAY BE REMOVED LATER
-            if return_raw:
-                raise NotImplementedError
-            x = x.contiguous()
-            assert x.ndim == 2
-            x = x.reshape((x.shape[0], -1, 2))
-            x = torch.softmax(x, axis=-1)
-            y = torch.repeat_interleave(x[:, 0, :], 2**(self.binary_depth - 1), -1)
-            offset = 1
-            for i in range(1, self.binary_depth):
-                for j in range(0, 2**i):
-                    k0 = j * 2**(self.binary_depth - i)
-                    k1 = (j + 1) * 2**(self.binary_depth - i)
-                    y[..., k0:k1] *= torch.repeat_interleave(x[:, offset, :],
-                                                             2**(self.binary_depth - i - 1),
-                                                             -1)
-                    offset += 1
-            y = self.low + (self.high - self.low) * torch.cumsum(y, axis=-1)[..., :-1]
-            return (y, x) if return_raw else y
-        else:
-            return ValueError
+        y = self.low + (self.high - self.low) * torch.cumsum(torch.softmax(x, axis=-1),
+                                                             axis=-1)[..., :-1]
+        return (y, x) if return_raw else y
 
     __call__ = forward
 
