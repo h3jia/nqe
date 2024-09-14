@@ -66,7 +66,8 @@ class QuantileLoss:
 
 # NOTE: p0_batch_avg is a bit tricky with multiple gpus, removed for now
 # NOTE: p0_after_epochs and l1_after_epochs seem not quite useful, removed for now
-# TODO: freeze the embedding network (?)
+# TODO: pretrain by first train median only, and then freeze the embedding network and
+#       only train the quantiles, and finally train everything together?
 def train_1d(quantile_net_1d, device='cpu', save_path=None, save_period=5,
              x=None, theta=None, batch_size=100, validation_fraction=0.15,
              train_loader=None, valid_loader=None, rescale_data=False,
@@ -426,7 +427,8 @@ def train_1d(quantile_net_1d, device='cpu', save_path=None, save_period=5,
                                                lambda_reg=lambda_reg, l0_train=np.asarray(l0_train),
                                                l1_train=np.asarray(l1_train),
                                                l0_valid=np.asarray(l0_valid),
-                                               l1_valid=np.asarray(l1_valid)), save_path + '.tmp')
+                                               l1_valid=np.asarray(l1_valid))._asdict(),
+                                   save_path + '.tmp') # saving as dict in case the def changes
                         if os.path.exists(save_path):
                             os.remove(save_path)
                         os.rename(save_path + '.tmp', save_path)
@@ -446,7 +448,7 @@ def train_1d(quantile_net_1d, device='cpu', save_path=None, save_period=5,
 
         if (not dist.is_initialized()) or dist.get_rank() == 0:
             if save_path is not None:
-                torch.save(train_result, save_path + '.tmp')
+                torch.save(train_result._asdict(), save_path + '.tmp')
                 if os.path.exists(save_path):
                     os.remove(save_path)
                 os.rename(save_path + '.tmp', save_path)
@@ -479,7 +481,7 @@ def _get_prev_state(save_path, device, verbose):
         if verbose > 0:
             print(f'[{datetime.datetime.now()}]  found previous checkpoint, will resume training '
                   f'from that.', flush=True)
-        return torch.load(save_path, map_location=device)
+        return TrainResult(**torch.load(save_path, map_location=device))
 
 
 def _decode_batch(batch_now, device):
